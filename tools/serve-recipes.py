@@ -2,6 +2,7 @@
 
 Sync URL on the Nook: http://<this PC's IP>:8080/index.txt
 Phone inbox (see recipe-inbox.py): POST /inbox, status page at /inbox
+Phone recipe browser and shopping list (see recipe-web.py): /cook/
 """
 import functools
 import http.server
@@ -24,6 +25,7 @@ def load(name, file):
 
 build_index = load("build_index", "build-index.py")
 inbox = load("recipe_inbox", "recipe-inbox.py")
+web = load("recipe_web", "recipe-web.py")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -45,6 +47,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/inbox", "/inbox/"):
             return self.reply(200, inbox.page(PORT), "text/html; charset=utf-8")
+        page = web.handle(path, LIBRARY)
+        if page:
+            return self.reply(*page, "text/html; charset=utf-8")
         # rebuild on each list request so new recipes show up without a restart
         if path == "/index.txt":
             build_index.build(LIBRARY)
@@ -74,4 +79,5 @@ if __name__ == "__main__":
     with http.server.ThreadingHTTPServer(("0.0.0.0", PORT), handler) as httpd:
         print(f"Serving {LIBRARY} on port {PORT}. Sync URL: http://<this PC's IP>:{PORT}/index.txt")
         print(f"Phone inbox: http://<this PC's IP>:{PORT}/inbox  token: {inbox.token()}")
+        print(f"Recipe browser: http://<this PC's IP>:{PORT}/cook/")
         httpd.serve_forever()
