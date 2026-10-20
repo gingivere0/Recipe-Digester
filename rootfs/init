@@ -1,0 +1,58 @@
+#!/bin/busybox sh
+# First process after the kernel. Sets up the system, then hands over to
+# busybox init, which keeps the recipe app running.
+
+/bin/busybox mkdir -p /proc /sys /dev /tmp /run /rom /data /var/run /sbin /usr/bin /usr/sbin
+/bin/busybox --install -s
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs -o mode=755 dev /dev
+mkdir -p /dev/pts /dev/input
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+ln -s /run /var/run 2>/dev/null
+
+# device nodes, and firmware loading for the Wi-Fi chip
+echo /sbin/hotplug > /proc/sys/kernel/hotplug
+mdev -s
+
+# wait for the internal storage partitions
+i=0
+while [ ! -b /dev/mmcblk0p8 ] && [ $i -lt 50 ]; do sleep 0.1; mdev -s; i=$((i+1)); done
+
+# The boot loader counts boots and forces a factory restore after 8 that
+# weren't "successful". Android used to reset this; now we do.
+mount -t vfat -o noatime,sync /dev/mmcblk0p2 /rom
+dd if=/dev/zero of=/rom/devconf/BootCnt bs=4 count=1 2>/dev/null
+
+# escape hatch: hold the "n" button while booting to go back to Android
+if [ -e /rom/u-boot.altboot ] && /usr/bin/cook --home-held; then
+    rm -f /rom/u-boot.altboot
+    sync
+    reboot -f
+fi
+
+mount -t vfat -o noatime,flush /dev/mmcblk0p8 /data
+mkdir -p /data/cook
+if [ ! -d /data/cook/recipes ]; then
+    mkdir -p /data/cook/recipes
+    cp /usr/share/cook/sample/* /data/cook/recipes/
+fi
+
+# CPU: run slow when idle, full speed when touched
+cd /sys/devices/system/cpu/cpu0/cpufreq && {
+    echo ondemand > scaling_governor
+    echo 300000 > scaling_min_freq
+    echo 1000000 > scaling_max_freq
+    echo 30000 > ondemand/sampling_rate 2>/dev/null
+    echo 70 > ondemand/up_threshold 2>/dev/null
+}
+cd /
+
+hostname nook
+ifconfig lo 127.0.0.1 up
+hwclock -s -u 2>/dev/null
+
+exec /sbin/init

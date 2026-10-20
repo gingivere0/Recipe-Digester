@@ -1,0 +1,165 @@
+#!/bin/sh
+# Wi-Fi control for the recipe app. Output lines: "MSG ...", "ERR ...",
+# "NET <signal> <secure> <ssid>", "DONE".
+#
+#   wifi up | down | scan | online
+#   wifi connect <conf>      (reads WIFI_SSID and WIFI_PSK from the environment)
+#
+# The radio is powered off ("down") whenever it isn't needed, which matters
+# a lot for battery life. In developer mode (/data/cook/devmode) it stays on.
+
+CONF=${WIFI_CONF:-/data/cook/wpa_supplicant.conf}
+CTRL=/var/run/wpa_supplicant
+MODS=/lib/modules
+
+msg() { echo "MSG $*"; }
+err() { echo "ERR $*"; }
+cli() { wpa_cli -p $CTRL -i wlan0 "$@"; }
+devmode() { [ -f /data/cook/devmode ] && [ -z "$WIFI_FORCE" ]; }
+
+up() {
+    for m in compat cfg80211 mac80211 wl12xx wl12xx_sdio; do
+        grep -q "^$m " /proc/modules || insmod $MODS/$m.ko 2>/dev/null || {
+            err "The Wi-Fi driver didn't load ($m)."
+            return 1
+        }
+    done
+    i=0
+    while [ ! -d /sys/class/net/wlan0 ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+    [ -d /sys/class/net/wlan0 ] || { err "The Wi-Fi hardware didn't start."; return 1; }
+    ifconfig wlan0 up 2>/dev/null
+
+    if [ ! -f "$CONF" ]; then
+        printf 'ctrl_interface=%s\nupdate_config=1\n' $CTRL > "$CONF"
+    elif ! grep -q "^ctrl_interface=$CTRL\$" "$CONF"; then
+        { echo "ctrl_interface=$CTRL"; grep -v '^ctrl_interface=' "$CONF"; } > "$CONF.new" && mv "$CONF.new" "$CONF"
+    fi
+    if ! cli ping >/dev/null 2>&1; then
+        wpa_supplicant -B -i wlan0 -D nl80211 -c "$CONF" >/tmp/wpa.log 2>&1 || {
+            err "The Wi-Fi service didn't start."
+            return 1
+        }
+        i=0
+        while ! cli ping >/dev/null 2>&1 && [ $i -lt 20 ]; do sleep 0.2; i=$((i+1)); done
+    fi
+}
+
+down() {
+    devmode && return 0
+    killall udhcpc 2>/dev/null
+    cli terminate >/dev/null 2>&1
+    sleep 0.3
+    killall wpa_supplicant 2>/dev/null
+    ifconfig wlan0 down 2>/dev/null
+    # removing the SDIO driver powers the chip off completely
+    rmmod wl12xx_sdio 2>/dev/null
+    return 0
+}
+
+wait_connected() {
+    i=0
+    while [ $i -lt ${1:-25} ]; do
+        cli status 2>/dev/null | grep -q '^wpa_state=COMPLETED' && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+
+dhcp() {
+    killall udhcpc 2>/dev/null
+    if devmode; then
+        udhcpc -i wlan0 -t 10 -T 2 -A 5 -b -s /etc/udhcpc.script >/dev/null 2>&1
+        i=0
+        while ! ip route 2>/dev/null | grep -q '^default' && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+        ip route | grep -q '^default'
+    else
+        udhcpc -i wlan0 -n -q -t 8 -T 2 -s /etc/udhcpc.script >/dev/null 2>&1
+    fi
+}
+
+online() {
+    grep -q '^network=' "$CONF" 2>/dev/null || {
+        err "Wi-Fi isn't set up yet. Open Settings, then Wi-Fi."
+        return 1
+    }
+    up || return 1
+    msg "Connecting to Wi-Fi…"
+    cli reconfigure >/dev/null 2>&1
+    wait_connected 30 || { err "Couldn't connect to Wi-Fi."; down; return 1; }
+    msg "Getting an address…"
+    dhcp || { err "Connected, but the network didn't give an address."; down; return 1; }
+    # set the clock (needed to check https certificates), then save it
+    ntpd -n -q -p pool.ntp.org >/dev/null 2>&1 && hwclock -w -u 2>/dev/null
+    return 0
+}
+
+scan() {
+    up || return 1
+    msg "Looking for networks…"
+    cli scan >/dev/null
+    sleep 4
+    tab=$(printf '\t')
+    cli scan_results | tail -n +2 | while IFS="$tab" read -r bssid freq sig flags ssid; do
+        [ -n "$ssid" ] || continue
+        case "$flags" in *WPA*|*WEP*|*RSN*) sec=1 ;; *) sec=0 ;; esac
+        echo "NET $sig $sec $ssid"
+    done | sort -t ' ' -k2,2 -n -r
+    down
+    echo DONE
+}
+
+connect() {
+    [ -n "$1" ] && CONF=$1
+    [ -n "$WIFI_SSID" ] || { err "No network chosen."; return 1; }
+    psk=
+    if [ -n "$WIFI_PSK" ]; then
+        len=${#WIFI_PSK}
+        if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then
+            err "Wi-Fi passwords are 8 to 63 characters."
+            return 1
+        fi
+        psk=$(printf '%s\n' "$WIFI_PSK" | wpa_passphrase "$WIFI_SSID" | awk -F= '/^[ \t]+psk=/ { print $2 }')
+        [ -n "$psk" ] || { err "That password can't be used."; return 1; }
+    fi
+    up || return 1
+    msg "Connecting to $WIFI_SSID…"
+    cli remove_network all >/dev/null
+    id=$(cli add_network | tail -n 1)
+    cli set_network "$id" ssid "\"$WIFI_SSID\"" >/dev/null
+    if [ -n "$psk" ]; then
+        cli set_network "$id" psk "$psk" >/dev/null
+    else
+        cli set_network "$id" key_mgmt NONE >/dev/null
+    fi
+    cli enable_network "$id" >/dev/null
+    cli select_network "$id" >/dev/null
+    if ! wait_connected 25; then
+        err "Couldn't connect. Check the password and try again."
+        cli remove_network all >/dev/null
+        down
+        return 1
+    fi
+    msg "Getting an address…"
+    if ! dhcp; then
+        err "Connected, but the network didn't give an address."
+        down
+        return 1
+    fi
+    cli save_config >/dev/null
+    sync
+    msg "Connected to $WIFI_SSID."
+    down
+    echo DONE
+}
+
+trap 'down; exit 1' TERM INT
+
+case "$1" in
+    up) up ;;
+    down) down ;;
+    scan) scan ;;
+    online) online ;;
+    connect) connect "$2" ;;
+    *) echo "usage: wifi up|down|scan|online|connect <conf>" >&2; exit 2 ;;
+esac

@@ -1,0 +1,17 @@
+# build output and device backups (backup/ is ~77 MB of partition images)
+out/
+backup/
+
+# private SSH key for the device
+.dev/
+
+# recipe inbox: secret token and per-job working folders
+tools/inbox-token.txt
+inbox/
+
+# generated on every sync request
+library/index.txt
+
+__pycache__/
+*.log
+logs/

@@ -1,0 +1,82 @@
+#!/bin/sh
+# Downloads recipes. Usage: cook-sync <url> [data dir]
+#
+# <url> points at a plain-text list with one recipe link per line (links can
+# be full addresses or relative to the list). Blank lines and lines starting
+# with "#" are skipped. If <url> is itself a recipe (starts with "# "), just
+# that one recipe is downloaded.
+#
+# The new set replaces the old one only if at least one recipe downloaded.
+
+URL=$1
+DATA=${2:-/data/cook}
+IN=$DATA/incoming
+
+fail() { echo "ERR $*"; rm -rf "$IN"; wifi down >/dev/null 2>&1; exit 1; }
+trap 'fail "Canceled."' TERM INT
+
+[ -n "$URL" ] || fail "No recipe source is set."
+
+echo "MSG Starting Wi-Fi…"
+wifi online || { wifi down >/dev/null 2>&1; exit 1; }
+
+get() { curl -fsSL --connect-timeout 15 --max-time 60 -o "$2" "$1"; }
+
+rm -rf "$IN"
+mkdir -p "$IN"
+echo "MSG Downloading the recipe list…"
+get "$URL" "$IN/.list" || fail "Couldn't download the recipe list. Check the address in Settings."
+
+# strip Windows line endings
+sed -i 's/\r$//' "$IN/.list"
+
+name_for() {
+    n=${1%%\?*}
+    n=${n##*/}
+    n=$(printf '%s' "$n" | sed 's/%20/ /g; s/[^A-Za-z0-9 ._-]/_/g')
+    [ -n "$n" ] || n=recipe
+    case "$n" in *.md|*.txt|*.MD|*.TXT) ;; *) n=$n.md ;; esac
+    echo "$n"
+}
+
+if head -n 1 "$IN/.list" | grep -q '^# '; then
+    mv "$IN/.list" "$IN/$(name_for "$URL")"
+    ok=1
+    total=1
+else
+    base=${URL%%\?*}
+    base=${base%/*}
+    host=$(printf '%s' "$URL" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
+    grep -v '^[[:space:]]*$' "$IN/.list" | grep -v '^[[:space:]]*#' > "$IN/.links"
+    total=$(wc -l < "$IN/.links" | tr -d ' ')
+    [ "$total" -gt 0 ] || fail "The recipe list is empty."
+    ok=0
+    i=0
+    while read -r link; do
+        i=$((i+1))
+        case "$link" in
+            *://*) u=$link ;;
+            /*) u=$host$link ;;
+            *) u=$base/$link ;;
+        esac
+        u=$(printf '%s' "$u" | sed 's/ /%20/g')
+        echo "MSG Downloading $i of $total…"
+        get "$u" "$IN/$(name_for "$u")" && ok=$((ok+1))
+    done < "$IN/.links"
+    rm -f "$IN/.list" "$IN/.links"
+fi
+
+[ "$ok" -gt 0 ] || fail "None of the recipes could be downloaded."
+
+rm -rf "$DATA/recipes.old"
+[ -d "$DATA/recipes" ] && mv "$DATA/recipes" "$DATA/recipes.old"
+mv "$IN" "$DATA/recipes"
+rm -rf "$DATA/recipes.old"
+sync
+wifi down >/dev/null 2>&1
+
+if [ "$ok" -eq "$total" ]; then
+    echo "DONE Downloaded $ok recipes."
+else
+    echo "DONE Downloaded $ok of $total recipes. Some links didn't work."
+fi

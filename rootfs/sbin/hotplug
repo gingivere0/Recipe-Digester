@@ -1,0 +1,17 @@
+#!/bin/sh
+# Kernel hotplug helper. Kernel 3.0 asks userspace to supply firmware files.
+if [ "$ACTION" = add ] && [ -n "$FIRMWARE" ]; then
+    d=/sys$DEVPATH
+    f=/lib/firmware/$FIRMWARE
+    if [ -e "$d/loading" ]; then
+        if [ -f "$f" ]; then
+            echo 1 > "$d/loading"
+            cat "$f" > "$d/data"
+            echo 0 > "$d/loading"
+        else
+            echo -1 > "$d/loading"
+        fi
+    fi
+    exit 0
+fi
+exec /sbin/mdev

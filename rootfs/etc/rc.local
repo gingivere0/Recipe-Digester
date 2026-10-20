@@ -1,0 +1,10 @@
+#!/bin/sh
+# Developer mode: keep Wi-Fi on and allow SSH logins with the key in
+# /data/cook/authorized_keys. Off unless /data/cook/devmode exists.
+if [ -f /data/cook/devmode ]; then
+    mkdir -p /root/.ssh /etc/dropbear
+    cp /data/cook/authorized_keys /root/.ssh/authorized_keys 2>/dev/null
+    chmod 700 /root/.ssh
+    chmod 600 /root/.ssh/authorized_keys 2>/dev/null
+    ( wifi online > /tmp/wifi.log 2>&1; dropbear -R -s -p 22 ) &
+fi

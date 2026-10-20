@@ -1,0 +1,4 @@
+::sysinit:/etc/rc.local
+::respawn:/bin/sh -c 'COOK_DATA=/data/cook exec /usr/bin/cook 2>>/tmp/cook.log'
+::shutdown:/etc/rc.shutdown
+::ctrlaltdel:/sbin/reboot
