@@ -36,6 +36,11 @@ void frame_rect(canvas_t *c, int x, int y, int w, int h, int t, px_t col);
 /* copy src rows [sy, sy+h) to dst rows [dy, dy+h), full width */
 void blit_rows(canvas_t *dst, int dy, const canvas_t *src, int sy, int h);
 
+/* images: a JPEG or PNG file decoded to RGB565 (row-major, portrait), shrunk
+ * to fit max_w x max_h. Returns NULL if it can't be read; free() the result. */
+px_t *image_load(const char *path, int max_w, int max_h, int *w, int *h);
+void  draw_image(canvas_t *c, int x, int y, const px_t *img, int w, int h);
+
 /* fonts */
 font_t *font_load(const char *path, int px_size);
 int  font_height(font_t *f);  /* line height */

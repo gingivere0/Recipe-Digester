@@ -26,7 +26,7 @@ For the current status and next steps, see [HANDOFF.md](HANDOFF.md).
 ## Layout
 
 ```
-app/            cook.c (UI), gfx.c/h (drawing, fonts), platform.c/h (hardware), third_party/stb_truetype.h
+app/            cook.c (UI), gfx.c/h (drawing, fonts, photos), platform.c/h (hardware), third_party/stb_truetype.h and stb_image.h
 rootfs/         files copied into the system: init, inittab, rc scripts, wifi, cook-sync, sample recipe
 build/          Dockerfile (ARMv7 Alpine build image), build.sh (produces out/)
 tools/          install.ps1 (first install from Android over adb), deploy.ps1 (updates over SSH), fb2png.py (screenshots)
@@ -87,4 +87,6 @@ Any paragraph text.
 
 The first line under the title becomes the subtitle in the list. Items and steps can be tapped to check them off.
 
-**Sync source:** set in Settings as a web address. It points either at one recipe file or at a list file with one recipe link per line. Links can be full addresses or relative to the list. Blank lines and lines starting with `#` are ignored. A sync replaces all recipes on the Nook, but only if at least one recipe downloads.
+A photo of the dish can go on its own line, usually under the subtitle: `![Photo](chocolate-chip-cookies.jpg)`. The link is relative to the recipe; sync downloads the JPEG or PNG next to it, and the app shows it across the text column (544 px wide fits without scaling).
+
+**Sync source:** set in Settings as a web address. It points either at one recipe file or at a list file with one recipe link per line. Links can be full addresses or relative to the list. Blank lines and lines starting with `#` are ignored. A sync replaces all recipes on the Nook, but only if at least one recipe downloads. Photos linked from a recipe are downloaded with it.

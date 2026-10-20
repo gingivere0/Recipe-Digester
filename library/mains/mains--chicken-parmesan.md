@@ -1,6 +1,8 @@
 # Chicken Parmesan
 Serves 4. Prep 15 min, cook 20 min, rest 10 min, total 45 min. Crispy pan-fried, then baked, with less sauce.
 
+![Photo of Chicken Parmesan](mains--chicken-parmesan.jpg)
+
 ## Ingredients
 - 4 skinless, boneless chicken breast halves
 - salt and freshly ground black pepper to taste

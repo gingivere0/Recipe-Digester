@@ -21,7 +21,7 @@
 #include "gfx.h"
 #include "platform.h"
 
-#define VERSION "1.0"
+#define VERSION "1.1"
 
 /* ---- look ---- */
 
@@ -125,6 +125,15 @@ typedef struct {
 static recipe_t *recipes;
 static int n_recipes;
 
+/* the photo of the open recipe, decoded once */
+static struct { char file[256]; px_t *px; int w, h; } photo;
+
+static void photo_clear(void)
+{
+    free(photo.px);
+    memset(&photo, 0, sizeof photo);
+}
+
 static char *xstrndup(const char *s, size_t n)
 {
     char *d = malloc(n + 1);
@@ -173,6 +182,7 @@ static void free_recipes(void)
 static void load_recipes(void)
 {
     free_recipes();
+    photo_clear();
     char dir[256];
     path_of(dir, sizeof dir, "recipes");
     DIR *d = opendir(dir);
@@ -207,7 +217,7 @@ static void load_recipes(void)
                 s += 2;
                 trim(&s, &t);
                 r->title = xstrndup(s, t - s);
-            } else if (r->title && !r->subtitle && t > s && s[0] != '#' && s[0] != '-' && s[0] != '*' &&
+            } else if (r->title && !r->subtitle && t > s && s[0] != '#' && s[0] != '-' && s[0] != '*' && s[0] != '!' &&
                        !isdigit((unsigned char)s[0])) {
                 r->subtitle = xstrndup(s, t - s);
             } else if (r->title && t - s > 1 && s[0] == '#') {
@@ -511,6 +521,35 @@ static void draw_library(void)
 
 enum { B_TITLE, B_H2, B_ITEM, B_STEP, B_PARA, B_GAP };
 
+/* "![text](link)": loads the photo, saved by cook-sync next to the recipe
+ * under the link's bare file name (cleaned up the same way). 0 if missing. */
+static int recipe_photo(const char *line)
+{
+    const char *l = strstr(line, "](");
+    const char *e = l ? strrchr(l, ')') : NULL;
+    if (!l || !e) return 0;
+    l += 2;
+    const char *q = memchr(l, '?', e - l);
+    if (q) e = q;
+    for (const char *s = l; s < e; s++) if (*s == '/') l = s + 1;
+    char name[256];
+    int n = 0;
+    for (const char *s = l; s < e && n < (int)sizeof name - 1; s++) {
+        if (!strncmp(s, "%20", 3)) { name[n++] = ' '; s += 2; }
+        else name[n++] = isalnum((unsigned char)*s) || strchr(" ._-", *s) ? *s : '_';
+    }
+    name[n] = 0;
+    if (!n) return 0;
+    if (strcmp(photo.file, name)) {
+        photo_clear();
+        snprintf(photo.file, sizeof photo.file, "%s", name);
+        char p[512];
+        snprintf(p, sizeof p, "%s/recipes/%s", data_dir, name);
+        photo.px = image_load(p, W - 2 * PAD, 720, &photo.w, &photo.h);
+    }
+    return photo.px != NULL;
+}
+
 /* lays out (and with draw=1, renders) the current recipe; returns height */
 static int layout_recipe(canvas_t *c, int draw)
 {
@@ -537,6 +576,15 @@ static int layout_recipe(canvas_t *c, int draw)
         int kind, indent = 0;
         char *txt = line, marker[16] = "";
         if (!n) { if (!prev_gap) y += lh / 2; prev_gap = 1; continue; }
+        if (line[0] == '!' && line[1] == '[') {
+            if (recipe_photo(line)) {
+                y += prev_gap ? 0 : lh / 2;
+                if (draw) draw_image(c, PAD + (text_w - photo.w) / 2, y, photo.px, photo.w, photo.h);
+                y += photo.h + lh / 2;
+                prev_gap = 1;
+            }
+            continue;
+        }
         if (line[0] == '#' && line[1] == ' ') { kind = B_TITLE; txt += 2; }
         else if (line[0] == '#') { kind = B_H2; while (*txt == '#') txt++; while (*txt == ' ') txt++; }
         else if ((line[0] == '-' || line[0] == '*') && line[1] == ' ') { kind = B_ITEM; txt += 2; }

@@ -27,5 +27,6 @@ Plain text.
 
 - `# ` is the title (one per file). `## ` starts a section.
 - Lines starting with `- ` or `1. ` can be checked off on the Nook.
-- Use plain text only. No images, links, tables, bold, or italics.
+- Use plain text only. No links, tables, bold, or italics.
+- One optional photo line, `![Photo of Recipe Title](<same name as the recipe>.jpg)`, goes under the subtitle, with the .jpg next to the .md (544 px wide works best). The phone inbox adds it itself when the source has a photo of the finished dish.
 - Keep quantities with both units where the source gives them.

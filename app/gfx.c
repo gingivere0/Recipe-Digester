@@ -8,6 +8,17 @@
 #define STBTT_STATIC
 #include "third_party/stb_truetype.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#if defined(__ARM_NEON)
+#define STBI_NEON
+#endif
+#include "third_party/stb_image.h"
+
 int gfx_mirror;
 
 int canvas_init(canvas_t *c, int w, int h)
@@ -88,6 +99,59 @@ void blit_rows(canvas_t *dst, int dy, const canvas_t *src, int sy, int h)
     for (int r = 0; r < w; r++)
         memcpy(dst->px + (size_t)r * dst->pitch + dy,
                src->px + (size_t)r * src->pitch + sy, (size_t)h * sizeof(px_t));
+}
+
+/* ---- images ---- */
+
+px_t *image_load(const char *path, int max_w, int max_h, int *w, int *h)
+{
+    int iw, ih, n;
+    unsigned char *rgb = stbi_load(path, &iw, &ih, &n, 3);
+    if (!rgb) return NULL;
+    int ow = iw, oh = ih;
+    if (ow > max_w) { oh = (int)((long long)oh * max_w / ow); ow = max_w; }
+    if (oh > max_h) { ow = (int)((long long)ow * max_h / oh); oh = max_h; }
+    if (ow < 1) ow = 1;
+    if (oh < 1) oh = 1;
+    px_t *out = malloc((size_t)ow * oh * sizeof(px_t));
+    if (!out) { stbi_image_free(rgb); return NULL; }
+    /* 4x4 ordered dither hides banding in 16-bit color */
+    static const int bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
+    for (int y = 0; y < oh; y++) {
+        int sy0 = (int)((long long)y * ih / oh), sy1 = (int)((long long)(y + 1) * ih / oh);
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (int x = 0; x < ow; x++) {
+            /* average the source pixels this output pixel covers */
+            int sx0 = (int)((long long)x * iw / ow), sx1 = (int)((long long)(x + 1) * iw / ow);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            unsigned r = 0, g = 0, b = 0, cnt = 0;
+            for (int sy = sy0; sy < sy1; sy++) {
+                const unsigned char *p = rgb + ((size_t)sy * iw + sx0) * 3;
+                for (int sx = sx0; sx < sx1; sx++, p += 3) { r += p[0]; g += p[1]; b += p[2]; cnt++; }
+            }
+            int d = bayer[y & 3][x & 3];
+            int rr = (int)(r / cnt) + d / 2 - 4, gg = (int)(g / cnt) + d / 4 - 2, bb = (int)(b / cnt) + d / 2 - 4;
+            rr = rr < 0 ? 0 : rr > 255 ? 255 : rr;
+            gg = gg < 0 ? 0 : gg > 255 ? 255 : gg;
+            bb = bb < 0 ? 0 : bb > 255 ? 255 : bb;
+            out[(size_t)y * ow + x] = RGB(rr, gg, bb);
+        }
+    }
+    stbi_image_free(rgb);
+    *w = ow;
+    *h = oh;
+    return out;
+}
+
+void draw_image(canvas_t *c, int x, int y, const px_t *img, int w, int h)
+{
+    int x0 = x, y0 = y, cw = w, ch = h;
+    if (!clip(c, &x0, &y0, &cw, &ch)) return;
+    for (int i = 0; i < cw; i++) {
+        px_t *p = at(c, x0 + i, y0);
+        const px_t *s = img + (size_t)(y0 - y) * w + (x0 - x + i);
+        for (int j = 0; j < ch; j++, s += w) p[j] = *s;
+    }
 }
 
 /* ---- utf-8 ---- */
