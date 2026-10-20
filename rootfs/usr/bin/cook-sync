@@ -7,6 +7,7 @@
 # that one recipe is downloaded. Photos a recipe links to with a
 # "![text](link)" line (relative to the recipe) are saved next to it, and so
 # is <recipe name>.thumb.jpg, the list picture, when the server has one.
+# favorites.txt next to the list (recipe file names) is saved as .favorites.
 #
 # The new set replaces the old one only if at least one recipe downloaded.
 
@@ -93,6 +94,8 @@ else
         fi
     done < "$IN/.links"
     rm -f "$IN/.list" "$IN/.links"
+    # favorites.txt next to the list: recipe file names, one per line
+    get "$(resolve favorites.txt "$URL")" "$IN/.favorites" 2>/dev/null || rm -f "$IN/.favorites"
 fi
 
 [ "$ok" -gt 0 ] || fail "None of the recipes could be downloaded."

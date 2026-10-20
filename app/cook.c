@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -122,6 +123,7 @@ typedef struct {
     char *lower; /* lowercase copy for searching */
     unsigned char *checked;
     int n_checkable;
+    int fav;     /* listed in favorites.txt */
     px_t *thumb; /* <name>.thumb.jpg from the sync, if any */
     int thumb_w, thumb_h;
 } recipe_t;
@@ -134,7 +136,10 @@ static int n_recipes;
 #define MAX_CATS 32
 static char *cats[MAX_CATS];
 static int n_cats, cat_count[MAX_CATS];
-static int cur_cat = -1; /* -1: the category list (or everything) */
+static int cur_cat = -1; /* -1: the category list (or everything), CAT_FAVS: favorites */
+static int n_favs;
+#define CAT_FAVS (-2)
+#define FAV_ROW (-1000) /* lib_rows entry for the Favorites row */
 
 /* the photo of the open recipe, decoded once */
 static struct { char file[256]; px_t *px; int w, h; } photo;
@@ -191,6 +196,7 @@ static void free_recipes(void)
     for (int i = 0; i < n_cats; i++) free(cats[i]);
     n_cats = 0;
     cur_cat = -1;
+    n_favs = 0;
 }
 
 static int cat_rank(const char *c)
@@ -287,6 +293,17 @@ static void load_recipes(void)
     closedir(d);
     qsort(recipes, n_recipes, sizeof *recipes, cmp_recipe);
     qsort(cats, n_cats, sizeof *cats, cmp_cat);
+    /* favorites.txt from the server (saved as .favorites): one file name per line */
+    char fp[512];
+    snprintf(fp, sizeof fp, "%s/.favorites", dir);
+    char *favs = read_all(fp);
+    for (char *line = favs ? strtok(favs, "\r\n") : NULL; line; line = strtok(NULL, "\r\n")) {
+        while (*line == ' ') line++;
+        for (char *e = line + strlen(line); e > line && e[-1] == ' '; ) *--e = 0;
+        for (int i = 0; i < n_recipes; i++)
+            if (!recipes[i].fav && !strcmp(recipes[i].file, line)) { recipes[i].fav = 1; n_favs++; }
+    }
+    free(favs);
     memset(cat_count, 0, sizeof cat_count);
     for (int i = 0; i < n_recipes; i++) {
         int c = cat_index(recipes[i].cat);
@@ -506,14 +523,15 @@ static int matches(recipe_t *r, const char *q)
 /* the category list shows when there's no search and more than one category */
 static int showing_cats(void)
 {
-    return cur_cat < 0 && !*query && n_cats > 1;
+    return cur_cat == -1 && !*query && (n_cats > 1 || n_favs);
 }
 
 static void build_library(void)
 {
     free(lib_rows);
-    lib_rows = malloc((n_recipes + n_cats + 1) * sizeof(int));
+    lib_rows = malloc((n_recipes + n_cats + 2) * sizeof(int));
     n_lib_rows = 0;
+    if (showing_cats() && n_favs) lib_rows[n_lib_rows++] = FAV_ROW;
     if (showing_cats())
         for (int c = 0; c < n_cats; c++) lib_rows[n_lib_rows++] = -1 - c;
     /* title matches first, then matches elsewhere in the text; a search
@@ -521,6 +539,7 @@ static void build_library(void)
     for (int pass = 0; pass < 2 && !showing_cats(); pass++)
         for (int i = 0; i < n_recipes; i++) {
             if (!*query && cur_cat >= 0 && strcmp(recipes[i].cat, cats[cur_cat])) continue;
+            if (!*query && cur_cat == CAT_FAVS && !recipes[i].fav) continue;
             char lt[256];
             snprintf(lt, sizeof lt, "%s", recipes[i].title);
             for (char *c = lt; *c; c++) *c = tolower((unsigned char)*c);
@@ -535,10 +554,11 @@ static void build_library(void)
     for (int i = 0; i < n_lib_rows; i++) {
         int y = i * ROW_H;
         if (lib_rows[i] < 0) {
-            int cat = -1 - lib_rows[i];
+            int cat = -1 - lib_rows[i], n = lib_rows[i] == FAV_ROW ? n_favs : cat_count[cat];
             char name[64], count[32];
-            cat_label(cats[cat], name, sizeof name);
-            snprintf(count, sizeof count, cat_count[cat] == 1 ? "1 recipe" : "%d recipes", cat_count[cat]);
+            if (lib_rows[i] == FAV_ROW) snprintf(name, sizeof name, "★ Favorites");
+            else cat_label(cats[cat], name, sizeof name);
+            snprintf(count, sizeof count, n == 1 ? "1 recipe" : "%d recipes", n);
             draw_fit(c, F.ui_bold, PAD, y + 18, W - 2 * PAD - 40, name, C_TEXT);
             draw_fit(c, F.small, PAD, y + 60, W - 2 * PAD - 40, count, C_MUTED);
             draw_text(c, F.title, W - PAD - 24, y + (ROW_H - font_height(F.title)) / 2 - 4, "›", -1, C_MUTED);
@@ -559,6 +579,7 @@ static void build_library(void)
             fill_round(c, PAD, ty, THUMB, THUMB, 12, RGB(240, 232, 216));
             draw_center(c, F.title, PAD, ty + (THUMB - font_height(F.title)) / 2, THUMB, first, C_ACCENT);
         }
+        if (r->fav) tx = draw_text(c, F.ui_bold, tx, y + 18, "★ ", -1, C_ACCENT);
         draw_fit(c, F.ui_bold, tx, y + 18, W - PAD - tx, r->title, C_TEXT);
         draw_fit(c, F.small, tx, y + 60, W - PAD - tx, r->subtitle, C_MUTED);
         fill_rect(c, PAD, y + ROW_H - 1, W - 2 * PAD, 1, C_LINE);
@@ -576,8 +597,9 @@ static int lib_visible_bottom(void)
 static void draw_library(void)
 {
     char name[64] = "Recipes";
-    int in_cat = cur_cat >= 0 && !*query;
-    if (in_cat) cat_label(cats[cur_cat], name, sizeof name);
+    int in_cat = cur_cat != -1 && !*query;
+    if (cur_cat == CAT_FAVS) snprintf(name, sizeof name, "Favorites");
+    else if (in_cat) cat_label(cats[cur_cat], name, sizeof name);
     draw_header(name, in_cat);
     /* search box */
     fill_rect(&screen, 0, SEARCH_Y, W, SEARCH_H, C_BG);
@@ -615,6 +637,127 @@ static void draw_library(void)
 
 enum { B_TITLE, B_H2, B_ITEM, B_STEP, B_PARA, B_GAP };
 
+/* ---- serving scaler: same rules as the phone page (tools/recipe-web.py) ---- */
+
+static const struct { int num, den; const char *label; } scales[] = {
+    { 1, 2, "½×" }, { 1, 1, "1×" }, { 2, 1, "2×" }, { 3, 1, "3×" }, { 5, 1, "5×" },
+};
+#define N_SCALES 5
+#define SCALE_1X 1
+static int cur_scale = SCALE_1X;
+static int scale_y0 = -1, scale_y1 = -1; /* the chip row in the recipe canvas */
+
+static const struct { const char *s; double v; } ufrac[] = {
+    { "½", 1.0 / 2 }, { "¼", 1.0 / 4 }, { "¾", 3.0 / 4 }, { "⅓", 1.0 / 3 }, { "⅔", 2.0 / 3 },
+    { "⅛", 1.0 / 8 }, { "⅜", 3.0 / 8 }, { "⅝", 5.0 / 8 }, { "⅞", 7.0 / 8 },
+};
+
+static int ufrac_at(const char *s, double *v)
+{
+    for (int i = 0; i < (int)(sizeof ufrac / sizeof *ufrac); i++) {
+        size_t n = strlen(ufrac[i].s);
+        if (!strncmp(s, ufrac[i].s, n)) { *v = ufrac[i].v; return (int)n; }
+    }
+    return 0;
+}
+
+/* one amount: 2, 1.5, 1/2, ½, 1 1/2, 1½. Returns bytes read, 0 if none. */
+static int parse_amount(const char *s, double *v)
+{
+    const char *p = s;
+    int n = ufrac_at(p, v);
+    if (n) return n;
+    if (!isdigit((unsigned char)*p)) return 0;
+    double a = strtod(p, (char **)&p);
+    if (*p == '/' && isdigit((unsigned char)p[1])) {
+        double b = strtod(p + 1, (char **)&p);
+        if (b == 0) return 0;
+        *v = a / b;
+        return (int)(p - s);
+    }
+    double f;
+    if ((n = ufrac_at(p, &f))) { *v = a + f; return (int)(p - s) + n; }
+    if (*p == ' ' && isdigit((unsigned char)p[1])) {
+        const char *q = p + 1;
+        double c = strtod(q, (char **)&q);
+        if (*q == '/' && isdigit((unsigned char)q[1])) {
+            double d = strtod(q + 1, (char **)&q);
+            if (d != 0) { *v = a + c / d; return (int)(q - s); }
+        }
+    } else if (*p == ' ' && (n = ufrac_at(p + 1, &f))) {
+        *v = a + f;
+        return (int)(p + 1 - s) + n;
+    }
+    *v = a;
+    return (int)(p - s);
+}
+
+/* an amount, or a range joined by - or –; returns bytes read */
+static int parse_qty(const char *s, double *a, double *b)
+{
+    int n = parse_amount(s, a);
+    if (!n) return 0;
+    *b = -1;
+    const char *p = s + n;
+    int sep = !strncmp(p, "–", 3) ? 3 : *p == '-' ? 1 : 0;
+    int m = sep ? parse_amount(p + sep, b) : 0;
+    if (m) return n + sep + m;
+    *b = -1;
+    return n;
+}
+
+/* whole numbers stay whole; else the nearest eighth or third; 10+ rounds to whole */
+static void fmt_qty(double v, char *out, size_t size)
+{
+    if (v >= 10 || fabs(v - floor(v + 0.5)) < 1e-9) { snprintf(out, size, "%d", (int)floor(v + 0.5)); return; }
+    double e = floor(v * 8 + 0.5) / 8, t = floor(v * 3 + 0.5) / 3;
+    double r = fabs(v - t) < fabs(v - e) ? t : e;
+    int whole = (int)floor(r + 1e-9);
+    double f = r - whole;
+    const char *fs = "";
+    for (int i = 0; i < (int)(sizeof ufrac / sizeof *ufrac); i++)
+        if (fabs(ufrac[i].v - f) < 1e-6) fs = ufrac[i].s;
+    if (!*fs) snprintf(out, size, "%d", whole + (f > 0.5));
+    else if (whole) snprintf(out, size, "%d%s", whole, fs);
+    else snprintf(out, size, "%s", fs);
+}
+
+static int put_qty(char *out, size_t size, double a, double b, double k)
+{
+    char x[24], y[24];
+    fmt_qty(a * k, x, sizeof x);
+    if (b < 0) return snprintf(out, size, "%s", x);
+    fmt_qty(b * k, y, sizeof y);
+    return snprintf(out, size, "%s–%s", x, y);
+}
+
+/* scales the leading amount of an ingredient (and a "(24 oz)" right after its
+ * unit, unless it describes a can, package, jar, box, bag, or stick) */
+static void scale_ingredient(const char *in, char *out, size_t size, double k)
+{
+    double a, b;
+    int n = parse_qty(in, &a, &b);
+    if (!n) { snprintf(out, size, "%s", in); return; }
+    int o = put_qty(out, size, a, b, k);
+    const char *rest = in + n, *paren = strchr(rest, '(');
+    if (paren && o < (int)size) {
+        char before[128];
+        snprintf(before, sizeof before, "%.*s", (int)(paren - rest), rest);
+        for (char *c = before; *c; c++) *c = tolower((unsigned char)*c);
+        static const char *containers[] = { "can", "package", "jar", "box", "bag", "stick" };
+        int skip = 0;
+        for (int i = 0; i < 6; i++) if (strstr(before, containers[i])) skip = 1;
+        double pa, pb;
+        int pn = skip ? 0 : parse_qty(paren + 1, &pa, &pb);
+        if (pn) {
+            o += snprintf(out + o, size - o, "%.*s(", (int)(paren - rest), rest);
+            if (o < (int)size) o += put_qty(out + o, size - o, pa, pb, k);
+            rest = paren + 1 + pn;
+        }
+    }
+    if (o < (int)size) snprintf(out + o, size - o, "%s", rest);
+}
+
 /* "![text](link)": loads the photo, saved by cook-sync next to the recipe
  * under the link's bare file name (cleaned up the same way). 0 if missing. */
 static int recipe_photo(const char *line)
@@ -651,7 +794,9 @@ static int layout_recipe(canvas_t *c, int draw)
     int sz = S.text_size;
     font_t *body = F.body[sz], *bold = F.body_bold[sz], *h1 = F.body_h1[sz], *h2 = F.body_h2[sz];
     int lh = font_height(body) * 13 / 10;
-    int y = 24, idx = 0, prev_gap = 1;
+    int y = 24, idx = 0, prev_gap = 1, in_ingredients = 0, chips_done = 0;
+    double k = (double)scales[cur_scale].num / scales[cur_scale].den;
+    scale_y0 = scale_y1 = -1;
     int text_w = W - 2 * PAD;
 
     if (draw) n_recipe_hits = 0;
@@ -692,6 +837,32 @@ static int layout_recipe(canvas_t *c, int draw)
             } else kind = B_PARA;
         } else kind = B_PARA;
         prev_gap = 0;
+        if (kind == B_H2 && !chips_done) {
+            /* serving scaler chips, above the first section */
+            chips_done = 1;
+            int ch = font_height(bold) + 22, cw = (text_w - 4 * 12) / N_SCALES;
+            y += lh / 4;
+            scale_y0 = y;
+            for (int i = 0; draw && i < N_SCALES; i++) {
+                int cx = PAD + i * (cw + 12), on = i == cur_scale;
+                fill_round(c, cx, y, cw, ch, ch / 2, on ? C_ACCENT : C_LINE);
+                if (!on) fill_round(c, cx + 2, y + 2, cw - 4, ch - 4, ch / 2 - 2, C_BG);
+                draw_center(c, bold, cx, y + 11, cw, scales[i].label, on ? C_HEADTXT : C_TEXT);
+            }
+            y += ch;
+            scale_y1 = y;
+        }
+        if (kind == B_H2) {
+            char low[64];
+            snprintf(low, sizeof low, "%s", txt);
+            for (char *c2 = low; *c2; c2++) *c2 = tolower((unsigned char)*c2);
+            in_ingredients = strstr(low, "ingredient") != NULL;
+        }
+        char scaled[2048];
+        if (kind == B_ITEM && in_ingredients && cur_scale != SCALE_1X) {
+            scale_ingredient(txt, scaled, sizeof scaled, k);
+            txt = scaled;
+        }
 
         font_t *f = body;
         px_t col = C_TEXT;
@@ -1225,6 +1396,7 @@ static void go(int s)
 
 static void open_recipe(int i)
 {
+    if (i != cur_recipe) cur_scale = SCALE_1X;
     cur_recipe = i;
     scr = SCR_RECIPE;
     kb = KB_NONE;
@@ -1363,11 +1535,11 @@ static void tap(int x, int y)
             else go(SCR_SETTINGS);
             return;
         }
-        if (back && cur_cat >= 0 && !*query) { cur_cat = -1; build_library(); return; }
+        if (back && cur_cat != -1 && !*query) { cur_cat = -1; build_library(); return; }
         if (y >= lib_view.top && y < lib_view.top + lib_view.height) {
             int row = (int)(y - lib_view.top + lib_view.pos) / ROW_H;
             if (row >= 0 && row < n_lib_rows) {
-                if (lib_rows[row] < 0) { cur_cat = -1 - lib_rows[row]; build_library(); }
+                if (lib_rows[row] < 0) { cur_cat = lib_rows[row] == FAV_ROW ? CAT_FAVS : -1 - lib_rows[row]; build_library(); }
                 else open_recipe(lib_rows[row]);
             }
         }
@@ -1390,6 +1562,11 @@ static void tap(int x, int y)
         if (y >= HEADER) {
             int cy = (int)(y - HEADER + recipe_view.pos);
             recipe_t *r = &recipes[cur_recipe];
+            if (cy >= scale_y0 && cy < scale_y1 && x >= PAD && x < W - PAD) {
+                int s = (x - PAD) * N_SCALES / (W - 2 * PAD);
+                if (s != cur_scale) { cur_scale = s; build_recipe(1); }
+                return;
+            }
             for (int i = 0; i < n_recipe_hits; i++)
                 if (cy >= recipe_hits[i].y0 && cy < recipe_hits[i].y1 && recipe_hits[i].idx < r->n_checkable) {
                     r->checked[recipe_hits[i].idx] ^= 1;
@@ -1506,7 +1683,7 @@ static void handle_event(event_t *e)
             else if (kb) kb = KB_NONE;
             else if (scr != SCR_LIBRARY && !job.kind) go(SCR_LIBRARY);
             else if (*query) { query[0] = 0; build_library(); }
-            else if (scr == SCR_LIBRARY && cur_cat >= 0) { cur_cat = -1; build_library(); }
+            else if (scr == SCR_LIBRARY && cur_cat != -1) { cur_cat = -1; build_library(); }
             dirty = 1;
         } else if (e->key == K_VOLDOWN || e->key == K_VOLUP) {
             S.brightness += e->key == K_VOLUP ? 10 : -10;
