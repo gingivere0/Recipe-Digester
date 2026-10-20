@@ -2,7 +2,7 @@
 
 Sync URL on the Nook: http://<this PC's IP>:8080/index.txt
 Phone inbox (see recipe-inbox.py): POST /inbox, status page at /inbox
-Phone recipe browser and shopping list (see recipe-web.py): /cook/
+Phone recipe browser, meal plan, and shopping list (see recipe-web.py): /cook/
 """
 import functools
 import http.server
@@ -40,6 +40,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
@@ -49,18 +50,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(200, inbox.page(PORT), "text/html; charset=utf-8")
         page = web.handle(path, LIBRARY)
         if page:
-            return self.reply(*page, "text/html; charset=utf-8")
+            return self.reply(*page)
         # rebuild on each list request so new recipes show up without a restart
         if path == "/index.txt":
             build_index.build(LIBRARY)
         super().do_GET()
 
     def do_POST(self):
-        if self.path.split("?")[0] not in ("/inbox", "/inbox/"):
+        path = self.path.split("?")[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        if path.startswith("/cook/api/"):
+            if not 0 < length <= 2_000_000:
+                return self.reply(400, "Nothing was sent, or it is too big.")
+            # `tailscale serve` proxies from this PC, so only Tailscale (or the PC itself) looks local
+            trusted = self.client_address[0] in ("127.0.0.1", "::1")
+            return self.reply(*web.handle_post(path, self.rfile.read(length), trusted, LIBRARY))
+        if path not in ("/inbox", "/inbox/"):
             return self.reply(404, "not found")
         if self.headers.get("X-Inbox-Token", "").strip() != inbox.token():
             return self.reply(403, "Wrong or missing X-Inbox-Token (see tools\\inbox-token.txt).")
-        length = int(self.headers.get("Content-Length") or 0)
         if not 0 < length <= MAX_UPLOAD:
             return self.reply(400, "Nothing was sent, or it is over 25 MB.")
         body = self.rfile.read(length)

@@ -15,3 +15,7 @@ library/index.txt
 __pycache__/
 *.log
 logs/
+
+# phone pages: shopping list and meal plan, and recipes removed or replaced from the phone
+state/
+trash/
