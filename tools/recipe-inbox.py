@@ -50,6 +50,23 @@ _jobs = queue.Queue()
 _on_recipe = None  # called after a recipe is written (rebuilds index.txt)
 
 
+def _load_video_intake():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("video_intake", os.path.join(HERE, "video_intake.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+video = _load_video_intake()  # video links and uploads (YouTube, TikTok, Instagram, ...)
+
+
+def _this():
+    """This module's functions, for video_intake (it's loaded by path, so not in sys.modules)."""
+    import types
+    return types.SimpleNamespace(**globals())
+
+
 def token():
     if not os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "w") as f:
@@ -61,7 +78,7 @@ def token():
 # ---- accepting uploads ------------------------------------------------------
 
 def sniff(body, content_type, filename=""):
-    """Returns (kind, extension, data) for an upload. kind is url, text, image, or pdf."""
+    """Returns (kind, extension, data) for an upload. kind is url, text, image, pdf, or video."""
     ct = (content_type or "").split(";")[0].strip().lower()
     if ct == "application/json":
         try:
@@ -84,6 +101,9 @@ def sniff(body, content_type, filename=""):
         return "image", ".heic", body
     if body.startswith(b"%PDF"):
         return "pdf", ".pdf", body
+    video_ext = video.upload_ext(body, ct, filename)
+    if video_ext:
+        return "video", video_ext, body
     if ct.startswith("image/"):
         return "image", "." + ct.split("/")[1], body
     text = body.decode("utf-8-sig", errors="replace").strip()
@@ -111,6 +131,10 @@ def submit(body, content_type, filename=""):
            "received": time.strftime("%Y-%m-%d %H:%M:%S")}
     if kind == "url":
         job["url"] = data.decode("utf-8")
+        if video.is_video_url(job["url"]):
+            job["kind"] = "video"
+    elif kind == "video" and filename:
+        job["filename"] = os.path.basename(filename)[:100]
     save(job)
     _jobs.put(job_id)
     return job
@@ -761,7 +785,9 @@ def prompt_for(job, note, photos=()):
     with open(os.path.join(LIBRARY, "README.md"), encoding="utf-8") as f:
         guide = f.read()
     guide = guide[guide.find("## Format"):] if "## Format" in guide else guide
-    if job["kind"] == "url":
+    if job["kind"] == "video":
+        where = note
+    elif job["kind"] == "url":
         where = f"The recipe was shared as a link: {job['url']}\n{note}"
     elif job["kind"] == "image":
         where = f"The recipe was shared as an image: read {job['source']} in the current folder."
@@ -878,12 +904,20 @@ def process(job_id):
         if job["kind"] == "url":
             note, page = fetch_page(job["url"], folder)
             job["fetch"] = note
+            # another video site yt-dlp knows, with no recipe data on the page
+            if not (page and recipe_json_ld(page)) and video.has_extractor(job["url"]):
+                job["kind"] = "video"
+                save(job)
         elif job["source"].endswith(".heic"):
             convert_heic(folder, job)
-        try:
-            photos = gather_candidates(job, folder, page)
-        except Exception as e:  # noqa: BLE001 - the recipe matters more than its photo
-            photos, job["photo"] = [], f"failed: {e}"
+        if job["kind"] == "video":
+            note, photos = video.prepare(job, folder, _this())
+            save(job)
+        else:
+            try:
+                photos = gather_candidates(job, folder, page)
+            except Exception as e:  # noqa: BLE001 - the recipe matters more than its photo
+                photos, job["photo"] = [], f"failed: {e}"
         reply = run_claude(job, folder, prompt_for(job, note, photos))
         category, slug, markdown = parse_reply(reply)
         photo = None
@@ -955,7 +989,7 @@ def add_photo(recipe):
         src = os.path.join(INBOX, job["id"], job["source"])
         shutil.copy(src, os.path.join(folder, job["source"]))
     else:
-        return f"{recipe}: it came from text, which has no photo"
+        return f"{recipe}: it came from {job['kind']}, which has no photo to pick again"
     photos = gather_candidates(job, folder, page)
     if not photos:
         return f"{recipe}: no images found in the source"

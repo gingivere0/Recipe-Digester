@@ -65,6 +65,12 @@ powershell -ExecutionPolicy Bypass -File tools\deploy.ps1
 
 The app runs without hardware when `COOK_SIM` points at a script of `tap x y`, `drag x1 y1 x2 y2`, `key home|power|volup|voldown`, and `shot file.png` lines. Set `COOK_DATA` to a folder with a `recipes/` subfolder. Build it natively inside `nook-build` with `gcc -O2 -o /tmp/cook app/*.c -lm`.
 
+## Video recipes in the inbox
+
+The phone inbox (`POST /inbox`, see `tools/recipe-inbox.py`) also takes video: links from YouTube (including Shorts), TikTok, Instagram, X, Facebook, Vimeo, and any other site yt-dlp knows, or an uploaded video file (up to 600 MB). `tools/video_intake.py` gathers the description, a recipe page linked from it, the captions (or a local faster-whisper transcript when there are none, for videos up to 30 minutes), and stills from the video, and Claude rebuilds the recipe from them. Guessed amounts are listed in Notes.
+
+Needs `py -3 -m pip install yt-dlp faster-whisper curl_cffi`, ffmpeg (`winget install Gyan.FFmpeg`, or `ffmpeg.exe` under `tools/bin/`), and Node.js for YouTube. When a site needs a login (often Instagram, X, and Facebook), save a Netscape-format cookies file from a signed-in browser as `tools/cookies.txt` (gitignored); otherwise the inbox tries Edge, Chrome, and Firefox cookies.
+
 ## Recipe format
 
 Plain text or Markdown files (`.md` or `.txt`):

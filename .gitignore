@@ -19,3 +19,8 @@ logs/
 # phone pages: shopping list and meal plan, and recipes removed or replaced from the phone
 state/
 trash/
+
+# video inbox: site login cookies, local tool binaries, and model caches
+tools/cookies.txt
+tools/bin/
+.cache/

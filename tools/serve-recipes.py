@@ -14,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LIBRARY = os.path.abspath(os.path.join(HERE, "..", "library"))
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 MAX_UPLOAD = 25_000_000
+MAX_VIDEO_UPLOAD = 600_000_000  # phone videos run 100+ MB
 
 
 def load(name, file):
@@ -69,8 +70,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(404, "not found")
         if self.headers.get("X-Inbox-Token", "").strip() != inbox.token():
             return self.reply(403, "Wrong or missing X-Inbox-Token (see tools\\inbox-token.txt).")
-        if not 0 < length <= MAX_UPLOAD:
-            return self.reply(400, "Nothing was sent, or it is over 25 MB.")
+        is_video = (self.headers.get("Content-Type", "").lower().startswith("video/") or
+                    os.path.splitext(self.headers.get("X-Filename", "").lower())[1] in inbox.video.VIDEO_EXTS)
+        if not 0 < length <= (MAX_VIDEO_UPLOAD if is_video else MAX_UPLOAD):
+            return self.reply(400, f"Nothing was sent, or it is over {600 if is_video else 25} MB.")
         body = self.rfile.read(length)
         try:
             job = inbox.submit(body, self.headers.get("Content-Type", ""), self.headers.get("X-Filename", ""))
