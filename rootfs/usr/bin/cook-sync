@@ -5,7 +5,8 @@
 # be full addresses or relative to the list). Blank lines and lines starting
 # with "#" are skipped. If <url> is itself a recipe (starts with "# "), just
 # that one recipe is downloaded. Photos a recipe links to with a
-# "![text](link)" line (relative to the recipe) are saved next to it.
+# "![text](link)" line (relative to the recipe) are saved next to it, and so
+# is <recipe name>.thumb.jpg, the list picture, when the server has one.
 #
 # The new set replaces the old one only if at least one recipe downloaded.
 
@@ -57,8 +58,12 @@ resolve() {
     printf '%s' "$r" | sed 's/ /%20/g'
 }
 
-# downloads the photos recipe file $1 (from address $2) links to
+# downloads the photos recipe file $1 (from address $2) links to, and its thumbnail
 photos() {
+    t=${2%%\?*}
+    t=${t%.*}.thumb.jpg
+    tn=$(basename "$1")
+    get "$t" "$IN/${tn%.*}.thumb.jpg" 2>/dev/null || rm -f "$IN/${tn%.*}.thumb.jpg"
     sed -n 's/^[[:space:]]*!\[[^]]*](\([^)]*\)).*/\1/p' "$1" | while read -r p; do
         pu=$(resolve "$p" "$2")
         pn=$(photo_name "$pu")

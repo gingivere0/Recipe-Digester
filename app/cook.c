@@ -44,6 +44,7 @@
 #define HEADER 76
 #define FOOTER 92
 #define PAD 28
+#define THUMB 80 /* list thumbnails */
 
 static const int body_sizes[] = { 26, 30, 35, 41 };
 static const char *size_names[] = { "Small", "Medium", "Large", "Extra large" };
@@ -114,16 +115,26 @@ static void save_settings(void)
 
 typedef struct {
     char *file;
+    char *cat; /* from a "<category>--" file name prefix, else "misc" */
     char *title;
     char *subtitle;
     char *text;
     char *lower; /* lowercase copy for searching */
     unsigned char *checked;
     int n_checkable;
+    px_t *thumb; /* <name>.thumb.jpg from the sync, if any */
+    int thumb_w, thumb_h;
 } recipe_t;
 
 static recipe_t *recipes;
 static int n_recipes;
+
+/* categories present, in the library's usual order; the list shows these
+ * first when there is more than one */
+#define MAX_CATS 32
+static char *cats[MAX_CATS];
+static int n_cats, cat_count[MAX_CATS];
+static int cur_cat = -1; /* -1: the category list (or everything) */
 
 /* the photo of the open recipe, decoded once */
 static struct { char file[256]; px_t *px; int w, h; } photo;
@@ -172,11 +183,43 @@ static void free_recipes(void)
 {
     for (int i = 0; i < n_recipes; i++) {
         recipe_t *r = &recipes[i];
-        free(r->file); free(r->title); free(r->subtitle); free(r->text); free(r->lower); free(r->checked);
+        free(r->file); free(r->cat); free(r->title); free(r->subtitle); free(r->text); free(r->lower); free(r->checked); free(r->thumb);
     }
     free(recipes);
     recipes = NULL;
     n_recipes = 0;
+    for (int i = 0; i < n_cats; i++) free(cats[i]);
+    n_cats = 0;
+    cur_cat = -1;
+}
+
+static int cat_rank(const char *c)
+{
+    static const char *order[] = { "breakfast", "mains", "sides", "soups", "salads", "baking", "desserts", "drinks" };
+    for (int i = 0; i < (int)(sizeof order / sizeof *order); i++)
+        if (!strcmp(c, order[i])) return i;
+    return !strcmp(c, "misc") ? 1000 : 100; /* others alphabetically, then misc */
+}
+
+static int cmp_cat(const void *a, const void *b)
+{
+    const char *x = *(char *const *)a, *y = *(char *const *)b;
+    int d = cat_rank(x) - cat_rank(y);
+    return d ? d : strcmp(x, y);
+}
+
+static int cat_index(const char *c)
+{
+    for (int i = 0; i < n_cats; i++) if (!strcmp(cats[i], c)) return i;
+    return -1;
+}
+
+/* "mains" -> "Mains"; misc (and unprefixed files) show as "Other" */
+static void cat_label(const char *c, char *out, size_t n)
+{
+    if (!strcmp(c, "misc")) { snprintf(out, n, "Other"); return; }
+    snprintf(out, n, "%s", c);
+    out[0] = toupper((unsigned char)out[0]);
 }
 
 static void load_recipes(void)
@@ -205,6 +248,10 @@ static void load_recipes(void)
         recipe_t *r = &recipes[n_recipes++];
         memset(r, 0, sizeof *r);
         r->file = strdup(n);
+        const char *dash = strstr(n, "--");
+        r->cat = dash && dash > n ? xstrndup(n, dash - n) : strdup("misc");
+        for (char *c = r->cat; *c; c++) *c = tolower((unsigned char)*c);
+        if (cat_index(r->cat) < 0 && n_cats < MAX_CATS) cats[n_cats++] = strdup(r->cat);
         r->text = text;
         /* title: first "# " line, else the file name; subtitle: first plain line */
         const char *p2 = text;
@@ -232,11 +279,19 @@ static void load_recipes(void)
             for (char *c = r->title; *c; c++) if (*c == '-' || *c == '_') *c = ' ';
         }
         if (!r->subtitle) r->subtitle = strdup("");
+        snprintf(p, sizeof p, "%s/%.*s.thumb.jpg", dir, (int)(strrchr(n, '.') - n), n);
+        r->thumb = image_load(p, THUMB, THUMB, &r->thumb_w, &r->thumb_h);
         r->lower = strdup(text);
         for (char *c = r->lower; *c; c++) *c = tolower((unsigned char)*c);
     }
     closedir(d);
     qsort(recipes, n_recipes, sizeof *recipes, cmp_recipe);
+    qsort(cats, n_cats, sizeof *cats, cmp_cat);
+    memset(cat_count, 0, sizeof cat_count);
+    for (int i = 0; i < n_recipes; i++) {
+        int c = cat_index(recipes[i].cat);
+        if (c >= 0) cat_count[c]++;
+    }
 }
 
 /* ---- scroll views: content pre-rendered into a tall canvas ---- */
@@ -296,7 +351,7 @@ static int scr = SCR_LIBRARY;
 static int dirty = 1;
 
 static scroll_t lib_view, recipe_view, wifi_view;
-static int *lib_rows, n_lib_rows; /* recipe indices shown */
+static int *lib_rows, n_lib_rows; /* recipe indices shown, or -1 - category index */
 static int cur_recipe = -1;
 
 typedef struct { int y0, y1, idx; } hit_t;
@@ -317,7 +372,7 @@ static struct {
     char btn[2][24];
     int action[2];
 } dlg;
-enum { ACT_NONE, ACT_CLOSE, ACT_POWEROFF, ACT_ANDROID, ACT_CANCEL_JOB, ACT_SET_SOURCE };
+enum { ACT_NONE, ACT_CLOSE, ACT_POWEROFF, ACT_ANDROID, ACT_CANCEL_JOB, ACT_SET_SOURCE, ACT_RESET };
 
 /* background job (wifi scan/connect, sync) */
 enum { JOB_NONE, JOB_SCAN, JOB_CONNECT, JOB_SYNC };
@@ -404,6 +459,8 @@ static void draw_battery(canvas_t *c, int right, int y)
     }
 }
 
+static int header_right = 150; /* room kept free at the right of the header */
+
 static void draw_header(const char *title, int back)
 {
     fill_rect(&screen, 0, 0, W, HEADER, C_HEAD);
@@ -412,7 +469,7 @@ static void draw_header(const char *title, int back)
         draw_text(&screen, F.back, 16, (HEADER - font_height(F.back)) / 2 - 4, "‹", -1, C_HEADTXT);
         x = 64;
     }
-    draw_fit(&screen, F.ui_bold, x, (HEADER - font_height(F.ui_bold)) / 2, W - x - 150, title, C_HEADTXT);
+    draw_fit(&screen, F.ui_bold, x, (HEADER - font_height(F.ui_bold)) / 2, W - x - header_right, title, C_HEADTXT);
     draw_battery(&screen, W - 18, (HEADER - 32) / 2);
 }
 
@@ -446,14 +503,24 @@ static int matches(recipe_t *r, const char *q)
     return 1;
 }
 
+/* the category list shows when there's no search and more than one category */
+static int showing_cats(void)
+{
+    return cur_cat < 0 && !*query && n_cats > 1;
+}
+
 static void build_library(void)
 {
     free(lib_rows);
-    lib_rows = malloc((n_recipes + 1) * sizeof(int));
+    lib_rows = malloc((n_recipes + n_cats + 1) * sizeof(int));
     n_lib_rows = 0;
-    /* title matches first, then matches elsewhere in the text */
-    for (int pass = 0; pass < 2; pass++)
+    if (showing_cats())
+        for (int c = 0; c < n_cats; c++) lib_rows[n_lib_rows++] = -1 - c;
+    /* title matches first, then matches elsewhere in the text; a search
+     * covers every category */
+    for (int pass = 0; pass < 2 && !showing_cats(); pass++)
         for (int i = 0; i < n_recipes; i++) {
+            if (!*query && cur_cat >= 0 && strcmp(recipes[i].cat, cats[cur_cat])) continue;
             char lt[256];
             snprintf(lt, sizeof lt, "%s", recipes[i].title);
             for (char *c = lt; *c; c++) *c = tolower((unsigned char)*c);
@@ -466,10 +533,34 @@ static void build_library(void)
     scroll_alloc(&lib_view, n_lib_rows * ROW_H + 40);
     canvas_t *c = &lib_view.c;
     for (int i = 0; i < n_lib_rows; i++) {
-        recipe_t *r = &recipes[lib_rows[i]];
         int y = i * ROW_H;
-        draw_fit(c, F.ui_bold, PAD, y + 18, W - 2 * PAD, r->title, C_TEXT);
-        draw_fit(c, F.small, PAD, y + 60, W - 2 * PAD, r->subtitle, C_MUTED);
+        if (lib_rows[i] < 0) {
+            int cat = -1 - lib_rows[i];
+            char name[64], count[32];
+            cat_label(cats[cat], name, sizeof name);
+            snprintf(count, sizeof count, cat_count[cat] == 1 ? "1 recipe" : "%d recipes", cat_count[cat]);
+            draw_fit(c, F.ui_bold, PAD, y + 18, W - 2 * PAD - 40, name, C_TEXT);
+            draw_fit(c, F.small, PAD, y + 60, W - 2 * PAD - 40, count, C_MUTED);
+            draw_text(c, F.title, W - PAD - 24, y + (ROW_H - font_height(F.title)) / 2 - 4, "›", -1, C_MUTED);
+            fill_rect(c, PAD, y + ROW_H - 1, W - 2 * PAD, 1, C_LINE);
+            continue;
+        }
+        recipe_t *r = &recipes[lib_rows[i]];
+        int ty = y + (ROW_H - THUMB) / 2, tx = PAD + THUMB + 20;
+        if (r->thumb) {
+            draw_image(c, PAD + (THUMB - r->thumb_w) / 2, ty + (THUMB - r->thumb_h) / 2, r->thumb, r->thumb_w, r->thumb_h);
+        } else {
+            /* no picture: the title's first letter on a tile */
+            char first[8] = "";
+            const char *t = r->title;
+            utf8_next(&t);
+            snprintf(first, sizeof first, "%.*s", (int)(t - r->title), r->title);
+            if (first[0] >= 'a' && first[0] <= 'z') first[0] -= 32;
+            fill_round(c, PAD, ty, THUMB, THUMB, 12, RGB(240, 232, 216));
+            draw_center(c, F.title, PAD, ty + (THUMB - font_height(F.title)) / 2, THUMB, first, C_ACCENT);
+        }
+        draw_fit(c, F.ui_bold, tx, y + 18, W - PAD - tx, r->title, C_TEXT);
+        draw_fit(c, F.small, tx, y + 60, W - PAD - tx, r->subtitle, C_MUTED);
         fill_rect(c, PAD, y + ROW_H - 1, W - 2 * PAD, 1, C_LINE);
     }
     lib_view.pos = 0;
@@ -484,7 +575,10 @@ static int lib_visible_bottom(void)
 
 static void draw_library(void)
 {
-    draw_header("Recipes", 0);
+    char name[64] = "Recipes";
+    int in_cat = cur_cat >= 0 && !*query;
+    if (in_cat) cat_label(cats[cur_cat], name, sizeof name);
+    draw_header(name, in_cat);
     /* search box */
     fill_rect(&screen, 0, SEARCH_Y, W, SEARCH_H, C_BG);
     int active = kb == KB_SEARCH;
@@ -672,11 +766,23 @@ static void build_recipe(int keep_pos)
     dirty = 1;
 }
 
+static int any_checked(recipe_t *r)
+{
+    for (int i = 0; i < r->n_checkable; i++) if (r->checked[i]) return 1;
+    return 0;
+}
+
+#define RESET_X (W - 226)
+
 static void draw_recipe(void)
 {
+    header_right = W - RESET_X;
     draw_header(recipes[cur_recipe].title, 1);
-    /* text size buttons over the battery spot */
-    fill_rect(&screen, W - 150, 0, 150, HEADER, C_HEAD);
+    header_right = 150;
+    /* reset (unchecks everything) and text size buttons over the battery spot */
+    fill_rect(&screen, RESET_X, 0, W - RESET_X, HEADER, C_HEAD);
+    draw_text(&screen, F.title, RESET_X + 16, (HEADER - font_height(F.title)) / 2 - 2, "↺", -1,
+              any_checked(&recipes[cur_recipe]) ? C_HEADTXT : C_MUTED);
     draw_text(&screen, F.ui_bold, W - 140, (HEADER - font_height(F.ui_bold)) / 2, "A−", -1, C_HEADTXT);
     draw_text(&screen, F.title, W - 68, (HEADER - font_height(F.title)) / 2, "A+", -1, C_HEADTXT);
     scroll_draw(&screen, &recipe_view);
@@ -1142,6 +1248,13 @@ static void do_action(int a)
         sync();
         if (!plat_sim) execlp("reboot", "reboot", NULL);
         break;
+    case ACT_RESET:
+        if (cur_recipe >= 0) {
+            recipe_t *r = &recipes[cur_recipe];
+            memset(r->checked, 0, r->n_checkable);
+            build_recipe(1);
+        }
+        break;
     case ACT_SET_SOURCE:
         go(SCR_SETTINGS);
         kb_open(KB_SOURCE, "Web address of your recipe list", *S.source ? S.source : "https://");
@@ -1250,13 +1363,23 @@ static void tap(int x, int y)
             else go(SCR_SETTINGS);
             return;
         }
+        if (back && cur_cat >= 0 && !*query) { cur_cat = -1; build_library(); return; }
         if (y >= lib_view.top && y < lib_view.top + lib_view.height) {
             int row = (int)(y - lib_view.top + lib_view.pos) / ROW_H;
-            if (row >= 0 && row < n_lib_rows) open_recipe(lib_rows[row]);
+            if (row >= 0 && row < n_lib_rows) {
+                if (lib_rows[row] < 0) { cur_cat = -1 - lib_rows[row]; build_library(); }
+                else open_recipe(lib_rows[row]);
+            }
         }
         break;
     case SCR_RECIPE:
         if (back) { go(SCR_LIBRARY); return; }
+        if (y < HEADER && x >= RESET_X && x < W - 150) {
+            if (any_checked(&recipes[cur_recipe]))
+                show_dialog("Start over?", "This clears every checked-off ingredient and step in this recipe.",
+                            "Clear", ACT_RESET, "Cancel", ACT_CLOSE);
+            return;
+        }
         if (y < HEADER && x >= W - 150) {
             if (x < W - 75) { if (S.text_size > 0) S.text_size--; }
             else if (S.text_size < 3) S.text_size++;
@@ -1383,6 +1506,7 @@ static void handle_event(event_t *e)
             else if (kb) kb = KB_NONE;
             else if (scr != SCR_LIBRARY && !job.kind) go(SCR_LIBRARY);
             else if (*query) { query[0] = 0; build_library(); }
+            else if (scr == SCR_LIBRARY && cur_cat >= 0) { cur_cat = -1; build_library(); }
             dirty = 1;
         } else if (e->key == K_VOLDOWN || e->key == K_VOLUP) {
             S.brightness += e->key == K_VOLUP ? 10 : -10;

@@ -85,7 +85,7 @@ Makes 24 · 30 minutes
 Any paragraph text.
 ```
 
-The first line under the title becomes the subtitle in the list. Items and steps can be tapped to check them off.
+The first line under the title becomes the subtitle in the list. The list opens on categories, taken from the file name prefix (`mains--chicken-parmesan.md` is in Mains; files without one go under Other), unless there's only one. Search covers every category. Each recipe in the list shows `<recipe name>.thumb.jpg` (80x80, downloaded with it when the server has one), or the title's first letter on a tile. Items and steps can be tapped to check them off. The ↺ button in the recipe's top bar unchecks them all, after asking.
 
 A photo of the dish can go on its own line, usually under the subtitle: `![Photo](chocolate-chip-cookies.jpg)`. The link is relative to the recipe; sync downloads the JPEG or PNG next to it, and the app shows it across the text column (544 px wide fits without scaling).
 

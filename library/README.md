@@ -29,4 +29,5 @@ Plain text.
 - Lines starting with `- ` or `1. ` can be checked off on the Nook.
 - Use plain text only. No links, tables, bold, or italics.
 - One optional photo line, `![Photo of Recipe Title](<same name as the recipe>.jpg)`, goes under the subtitle, with the .jpg next to the .md (544 px wide works best). The phone inbox adds it itself when the source has a photo of the finished dish.
+- The Nook's list shows `<same name>.thumb.jpg` (80x80) next to each recipe: cut from the photo, or an icon Claude draws when there's no photo. `py -3 tools\recipe-inbox.py --thumbs` makes any that are missing.
 - Keep quantities with both units where the source gives them.

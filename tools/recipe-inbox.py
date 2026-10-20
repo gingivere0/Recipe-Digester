@@ -40,6 +40,11 @@ IMAGE_TYPES = {b"\xff\xd8\xff": ".jpg", b"\x89PNG": ".png", b"GIF8": ".gif"}
 # taller photos are center-cropped so the ingredients stay near the top
 PHOTO_W, PHOTO_MAX_H = 544, 380
 MAX_CANDIDATES = 8
+# list thumbnails: <recipe name>.thumb.jpg, a square cut from the photo or,
+# without one, a simple icon Claude draws; corners rounded onto the list's
+# background color
+THUMB, THUMB_RADIUS, THUMB_BG = 80, 12, (250, 247, 240)
+ICON_TILE = (240, 232, 216)  # icons sit on a soft tile, so they line up with photos
 
 _jobs = queue.Queue()
 _on_recipe = None  # called after a recipe is written (rebuilds index.txt)
@@ -551,6 +556,205 @@ def insert_photo_line(markdown, name, title):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
 
 
+# ---- list thumbnails and icons -----------------------------------------------
+
+ICON_PROMPT = """Draw a minimalist icon of this dish (shown small, about 80 px, in
+the recipe list when there's no photo) as ONE line of SVG:
+ICON: <svg viewBox="0 0 100 100">...</svg>
+Use only circle, ellipse, rect, line, polyline, polygon, and path (commands M L H V
+C Q Z only), with fill, stroke, and stroke-width attributes. Keep it flat and simple:
+3 to 10 shapes, bold strokes (stroke-width 4 to 6) in #3A322B, with at most two soft
+fill colors (like #E9C46A, #E76F51, #9DB87A, #F4E3C1, or the dish's real colors).
+Fill most of the 100x100 box (stay within 8 to 92). No text, no background rect.
+"""
+
+
+def _num(v, default=0.0):
+    try:
+        return float(re.sub(r"[a-z%]+$", "", str(v).strip()))
+    except ValueError:
+        return default
+
+
+def _path_points(d):
+    """Flattens an SVG path (M L H V C Q Z, absolute or relative) into polylines."""
+    tokens = re.findall(r"[MLHVCQZmlhvcqz]|-?\d*\.?\d+(?:e-?\d+)?", d)
+    polys, cur, x, y, cmd, i = [], [], 0.0, 0.0, "M", 0
+
+    def take(n):
+        nonlocal i
+        vals = [float(t) for t in tokens[i:i + n]]
+        i += n
+        return vals
+
+    while i < len(tokens):
+        if tokens[i].isalpha():
+            cmd = tokens[i]
+            i += 1
+            if cmd in "Zz":
+                if cur:
+                    cur.append(cur[0])
+                    polys.append((cur, True))
+                    x, y = cur[0]
+                cur = []
+                continue
+        rel = cmd.islower()
+        c = cmd.upper()
+        ox, oy = (x, y) if rel else (0.0, 0.0)
+        try:
+            if c == "M":
+                px, py = take(2)
+                if cur:
+                    polys.append((cur, False))
+                x, y = ox + px, oy + py
+                cur = [(x, y)]
+                cmd = "l" if rel else "L"
+            elif c == "L":
+                px, py = take(2)
+                x, y = ox + px, oy + py
+                cur.append((x, y))
+            elif c == "H":
+                x = (x if rel else 0) + take(1)[0]
+                cur.append((x, y))
+            elif c == "V":
+                y = (y if rel else 0) + take(1)[0]
+                cur.append((x, y))
+            elif c in "CQ":
+                vals = take(6 if c == "C" else 4)
+                pts = [(x, y)] + [(ox + vals[k], oy + vals[k + 1]) for k in range(0, len(vals), 2)]
+                for step in range(1, 13):
+                    t = step / 12
+                    if c == "C":
+                        a, b, cc, dd = pts
+                        px = (1-t)**3*a[0] + 3*(1-t)**2*t*b[0] + 3*(1-t)*t*t*cc[0] + t**3*dd[0]
+                        py = (1-t)**3*a[1] + 3*(1-t)**2*t*b[1] + 3*(1-t)*t*t*cc[1] + t**3*dd[1]
+                    else:
+                        a, b, cc = pts
+                        px = (1-t)**2*a[0] + 2*(1-t)*t*b[0] + t*t*cc[0]
+                        py = (1-t)**2*a[1] + 2*(1-t)*t*b[1] + t*t*cc[1]
+                    cur.append((px, py))
+                x, y = pts[-1]
+            else:
+                i += 1  # unsupported command: skip its numbers
+        except (ValueError, IndexError):
+            break
+        if not cur:
+            cur = [(x, y)]
+    if len(cur) > 1:
+        polys.append((cur, False))
+    return polys
+
+
+def render_icon(svg, size=THUMB):
+    """Draws the simple SVG subset from ICON_PROMPT with Pillow. Returns an RGB image or None."""
+    import xml.etree.ElementTree as ET
+    from PIL import Image, ImageColor, ImageDraw
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return None
+    box = [_num(v) for v in (root.get("viewBox") or "0 0 100 100").replace(",", " ").split()]
+    if len(box) != 4 or box[2] <= 0 or box[3] <= 0:
+        box = [0, 0, 100, 100]
+    big = size * 5
+    k = big / max(box[2], box[3])
+    img = Image.new("RGB", (big, big), ICON_TILE)
+    draw = ImageDraw.Draw(img)
+    drawn = 0
+
+    def color(v):
+        if not v or v in ("none", "transparent"):
+            return None
+        try:
+            return ImageColor.getrgb(v)
+        except ValueError:
+            return None
+
+    def pt(px, py):
+        return ((px - box[0]) * k, (py - box[1]) * k)
+
+    def walk(el, inherited):
+        nonlocal drawn
+        attrs = dict(inherited)
+        for key in ("fill", "stroke", "stroke-width"):
+            if el.get(key) is not None:
+                attrs[key] = el.get(key)
+        for part in (el.get("style") or "").split(";"):
+            if ":" in part:
+                key, value = (p.strip() for p in part.split(":", 1))
+                if key in ("fill", "stroke", "stroke-width"):
+                    attrs[key] = value
+        tag = el.tag.split("}")[-1]
+        fill, stroke = color(attrs.get("fill", "black")), color(attrs.get("stroke"))
+        width = max(1, round(_num(attrs.get("stroke-width"), 1) * k)) if stroke else 0
+        g = lambda name, d=0.0: _num(el.get(name), d)  # noqa: E731
+        if tag in ("circle", "ellipse"):
+            rx = g("r") if tag == "circle" else g("rx")
+            ry = g("r") if tag == "circle" else g("ry")
+            (x0, y0), (x1, y1) = pt(g("cx") - rx, g("cy") - ry), pt(g("cx") + rx, g("cy") + ry)
+            if x1 > x0 and y1 > y0:
+                draw.ellipse((x0, y0, x1, y1), fill=fill, outline=stroke, width=width)
+                drawn += 1
+        elif tag == "rect":
+            (x0, y0), (x1, y1) = pt(g("x"), g("y")), pt(g("x") + g("width"), g("y") + g("height"))
+            if x1 > x0 and y1 > y0:
+                draw.rounded_rectangle((x0, y0, x1, y1), radius=g("rx", g("ry")) * k, fill=fill,
+                                       outline=stroke, width=width)
+                drawn += 1
+        elif tag in ("line", "polyline", "polygon", "path"):
+            if tag == "line":
+                polys = [([(g("x1"), g("y1")), (g("x2"), g("y2"))], False)]
+                fill = None
+            elif tag == "path":
+                polys = _path_points(el.get("d") or "")
+            else:
+                nums = [_num(v) for v in re.findall(r"-?\d*\.?\d+", el.get("points") or "")]
+                pts = list(zip(nums[0::2], nums[1::2]))
+                polys = [(pts + pts[:1], True)] if tag == "polygon" else [(pts, False)]
+            for pts, closed in polys:
+                xy = [pt(*p) for p in pts]
+                if len(xy) < 2:
+                    continue
+                if fill and len(xy) > 2:
+                    draw.polygon(xy, fill=fill)
+                if stroke:
+                    draw.line(xy, fill=stroke, width=width, joint="curve")
+                    r = width / 2
+                    for cx, cy in (xy[0], xy[-1]):  # round caps
+                        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=stroke)
+                drawn += 1
+        for child in el:
+            walk(child, attrs)
+
+    walk(root, {})
+    if not drawn:
+        return None
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def parse_icon(reply):
+    m = re.search(r"^ICON:\s*(<svg\b.*?</svg>)", reply, re.M | re.S | re.I)
+    return m.group(1) if m else None
+
+
+def make_thumb(img):
+    """Square center cut of a photo (or an icon), corners rounded onto the list background."""
+    from PIL import Image, ImageDraw
+    w, h = img.size
+    side = min(w, h)
+    img = img.crop(((w - side) // 2, (h - side) // 2, (w - side) // 2 + side, (h - side) // 2 + side))
+    img = img.resize((THUMB, THUMB), Image.LANCZOS)
+    mask = Image.new("L", (THUMB * 4, THUMB * 4), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, THUMB * 4 - 1, THUMB * 4 - 1), radius=THUMB_RADIUS * 4, fill=255)
+    out = Image.new("RGB", (THUMB, THUMB), THUMB_BG)
+    out.paste(img, (0, 0), mask.resize((THUMB, THUMB), Image.LANCZOS))
+    return out
+
+
+def save_thumb(img, md_path):
+    make_thumb(img).save(md_path[:-3] + ".thumb.jpg", "JPEG", quality=92)
+
+
 # ---- running Claude ---------------------------------------------------------
 
 def prompt_for(job, note, photos=()):
@@ -584,6 +788,7 @@ SLUG: <2 to 5 lowercase words joined by hyphens, like chicken-tikka-masala>
 
 Don't put image lines in the Markdown; the photo is added separately.
 {photo_prompt(job, photos)}
+Also add a line after SLUG with an icon. {ICON_PROMPT}
 If the source has no recipe in it, reply with only: NOT_A_RECIPE: <short reason>
 """
 
@@ -636,8 +841,9 @@ def parse_reply(reply):
     return category, slug, markdown
 
 
-def write_recipe(category, slug, markdown, photo=None):
-    """Writes the recipe (and its photo, a PIL image, as <same name>.jpg)."""
+def write_recipe(category, slug, markdown, photo=None, icon=None):
+    """Writes the recipe, its photo (a PIL image) as <same name>.jpg, and its list
+    thumbnail, cut from the photo or else drawn from the icon SVG."""
     folder = os.path.join(LIBRARY, category)
     os.makedirs(folder, exist_ok=True)
     name, n = f"{category}--{slug}.md", 2
@@ -648,6 +854,12 @@ def write_recipe(category, slug, markdown, photo=None):
         markdown = insert_photo_line(markdown, name[:-3] + ".jpg", markdown.splitlines()[0][2:].strip())
     with open(os.path.join(folder, name), "w", encoding="utf-8", newline="\n") as f:
         f.write(markdown)
+    try:
+        thumb = photo if photo is not None else (render_icon(icon) if icon else None)
+        if thumb is not None:
+            save_thumb(thumb, os.path.join(folder, name))
+    except Exception as e:  # noqa: BLE001 - the recipe is written; the list shows a letter instead
+        print(f"thumbnail for {name} failed: {e}", flush=True)
     return f"{category}/{name}"
 
 
@@ -684,7 +896,7 @@ def process(job_id):
                 job["photo"] = f"failed: {e}"
         elif photos:
             job["photo"] = "none picked"
-        job["recipe"] = write_recipe(category, slug, markdown, photo)
+        job["recipe"] = write_recipe(category, slug, markdown, photo, parse_icon(reply))
         job["title"] = markdown.splitlines()[0][2:].strip()
         job["status"] = "done"
         if _on_recipe:
@@ -758,6 +970,7 @@ Reply with ONLY the PHOTO line.
         return f"{recipe}: no photo of the finished dish found"
     name = os.path.basename(recipe)[:-3] + ".jpg"
     save_photo(photo, os.path.join(os.path.dirname(path), name))
+    save_thumb(photo, path)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(insert_photo_line(markdown, name, title))
     return f"{recipe}: added {name} (from {choice[0]})"
@@ -817,10 +1030,50 @@ setTimeout(() => {{ if (document.querySelector('.working, .queued')) location.re
 </script></body></html>"""
 
 
+def add_thumbs(redo=False):
+    """Makes list thumbnails for library recipes that have none: from the recipe's
+    photo, or an icon Claude draws from the recipe. Returns messages."""
+    out = []
+    for cat in sorted(os.listdir(LIBRARY)):
+        folder = os.path.join(LIBRARY, cat)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if not name.endswith(".md") or (os.path.exists(path[:-3] + ".thumb.jpg") and not redo):
+                continue
+            with open(path, encoding="utf-8") as f:
+                markdown = f.read()
+            m = re.search(r"^!\[[^\]]*\]\(([^)?]+)\)", markdown, re.M)
+            photo = os.path.join(folder, os.path.basename(m.group(1))) if m else None
+            if photo and os.path.exists(photo):
+                save_thumb(_open_image(photo), path)
+                out.append(f"{cat}/{name}: thumbnail from its photo")
+                continue
+            work = os.path.join(INBOX, "icon-" + name[:-3])
+            os.makedirs(work, exist_ok=True)
+            prompt = ("Here is a recipe:\n\n" + markdown[:3000] + "\n\n" + ICON_PROMPT +
+                      "\nReply with ONLY the ICON line.\n")
+            svg = parse_icon(run_claude({}, work, prompt))
+            icon = render_icon(svg) if svg else None
+            if icon is None:
+                out.append(f"{cat}/{name}: no usable icon (see {work}\\claude.log)")
+                continue
+            with open(os.path.join(work, "icon.svg"), "w", encoding="utf-8") as f:
+                f.write(svg)
+            save_thumb(icon, path)
+            out.append(f"{cat}/{name}: drew an icon")
+    return out
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 2 and sys.argv[1] == "--photo":
         for r in sys.argv[2:]:
             print(add_photo(r.replace("\\", "/").removeprefix("library/")), flush=True)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--thumbs":
+        for line in add_thumbs(redo="--redo" in sys.argv):
+            print(line, flush=True)
     else:
-        print("usage: py -3 tools\\recipe-inbox.py --photo <category>/<name>.md ...")
+        print("usage: py -3 tools\\recipe-inbox.py --photo <category>/<name>.md ...\n"
+              "       py -3 tools\\recipe-inbox.py --thumbs [--redo]")
