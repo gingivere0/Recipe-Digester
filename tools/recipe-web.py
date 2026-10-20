@@ -60,6 +60,14 @@ def read(library, rel):
         return parse(f.read())
 
 
+def photo_url(library, cat, base):
+    """The dish photo, else the 80x80 stand-in icon (<name>.thumb.jpg), else ""."""
+    for candidate in (base + ".jpg", base + ".thumb.jpg"):
+        if os.path.isfile(os.path.join(library, cat, candidate)):
+            return f"/{quote(cat)}/{quote(candidate)}"
+    return ""
+
+
 def recipes(library):
     """[(category, [(rel, title, subtitle, thumb)])] in display order."""
     found = {}
@@ -74,10 +82,7 @@ def recipes(library):
             title = recipe["title"] or name[:-3].split("--")[-1].replace("-", " ")
             base = name[:-3]
             thumb = ""
-            for candidate in (base + ".jpg", base + ".thumb.jpg"):  # thumbs have light corners baked in
-                if os.path.isfile(os.path.join(folder, candidate)):
-                    thumb = f"/{quote(cat)}/{quote(candidate)}"
-                    break
+            thumb = photo_url(library, cat, base)
             found.setdefault(cat, []).append((f"{cat}/{name}", title, recipe["subtitle"], thumb))
     order = sorted(found, key=lambda c: (CATEGORIES.index(c) if c in CATEGORIES else 99, c))
     return [(c, sorted(found[c], key=lambda r: r[1].lower())) for c in order]
@@ -103,9 +108,10 @@ h2 { font-size:14px; text-transform:uppercase; letter-spacing:.06em; color:var(-
 ul.cards { list-style:none; margin:0; padding:0; }
 ul.cards li a { display:flex; gap:12px; align-items:center; padding:10px; margin-bottom:8px; background:var(--card);
   border:1px solid var(--line); border-radius:12px; color:var(--ink); }
-ul.cards img, ul.cards .noimg { width:64px; height:64px; border-radius:8px; object-fit:cover; flex:none; background:var(--line); }
+ul.cards img, ul.cards .noimg { width:64px; height:64px; border-radius:12px; object-fit:cover; flex:none; background:var(--line); }
 .t { font-weight:600; } .s { color:var(--muted); font-size:14px; }
 .hero { width:100%; border-radius:12px; margin:4px 0 8px; }
+.icon { width:96px; height:96px; border-radius:16px; display:block; margin:4px 0 8px; }
 .sub { color:var(--muted); margin:0 0 12px; }
 .recipe ul, .recipe ol { padding-left:22px; } .recipe li { margin:4px 0; }
 .recipe h3 { font-size:15px; margin:12px 0 4px; }
@@ -176,8 +182,11 @@ def recipe_page(library, rel):
         return None
     cat = rel.split("/")[0]
     out = ['<div class="recipe">']
+    base = os.path.basename(rel)[:-3]
     if recipe["photo"] and not re.match(r"[a-z]+:", recipe["photo"]):
         out.append(f'<img class="hero" src="/{quote(cat)}/{quote(recipe["photo"])}" alt="">')
+    elif os.path.isfile(os.path.join(library, cat, base + ".thumb.jpg")):
+        out.append(f'<img class="icon" src="/{quote(cat)}/{quote(base + ".thumb.jpg")}" alt="">')
     if recipe["subtitle"]:
         out.append(f'<p class="sub">{esc(recipe["subtitle"])}</p>')
     ingredients = []
