@@ -868,14 +868,15 @@ function list(st) {
   }
   $('clear').addEventListener('click', function () { if (confirm('Clear the whole list?')) { st.list = []; save(); render(); } });
   function needed() { var lines = []; st.list.forEach(function (r) { r.items.forEach(function (i) { if (!i.have) lines.push(i.text); }); }); return lines; }
-  // Notes only makes checklist items from its own private pasteboard type, which
-  // Safari can't write (Markdown task lists, HTML checkboxes, and the share sheet
-  // all arrive as plain text on iOS 27). Bare lines convert in one tap there.
+  // Pasted or shared text never becomes a Notes checklist, but sharing a .md
+  // file and choosing Notes > Import does: "- [ ]" lines arrive as checklist
+  // items (tested on iOS 27).
   $('notes').addEventListener('click', function () {
     var lines = needed();
     if (!lines.length) { toast('Nothing left to buy.'); return; }
-    var text = 'Shopping list\n' + lines.join('\n');
-    if (navigator.share) { navigator.share({ text: text }).catch(function () {}); return; }
+    var md = '# Shopping list\n\n' + lines.map(function (l) { return '- [ ] ' + l; }).join('\n') + '\n';
+    var f = new File([md], 'Shopping list.md', { type: 'text/markdown' });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) { navigator.share({ files: [f] }).catch(function () {}); return; }
     toast('Sharing needs Safari on the ts.net address.');
   });
   $('copy').addEventListener('click', function () {
