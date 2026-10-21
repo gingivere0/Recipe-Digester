@@ -462,7 +462,8 @@ def recipe_page(library, rel):
                '<div class="bar"><button class="btn" id="notes-save">Save notes</button>'
                '<button class="btn quiet" id="notes-cancel">Cancel</button></div></div>'
                '<div class="bar"><button class="btn quiet" id="notes-open">Edit notes</button>'
-               f'<a class="btn quiet" href="/cook/edit/{quote(rel)}">Edit recipe</a></div>')
+               f'<a class="btn quiet" href="/cook/edit/{quote(rel)}">Edit recipe</a>'
+               '<button class="btn danger" id="delete">Delete</button></div>')
     out.append("</div>")
     data = {"page": "recipe", "id": rel, "title": recipe["title"], "items": ingredients_of(recipe),
             "notes": notes, "fav": name in favorites(library)}
@@ -659,16 +660,21 @@ function recipe(st) {
   $('notes-save').addEventListener('click', function () {
     api('notes', { id: D.id, notes: $('notes-text').value }).then(function () { location.reload(); });
   });
+  confirmDelete();
+}
+
+function confirmDelete() {
+  $('delete').addEventListener('click', function () {
+    if (!confirm('Delete this recipe? It moves to the trash folder on the PC.')) return;
+    api('delete', { id: D.id }).then(function () { location.href = '/cook/'; });
+  });
 }
 
 function edit() {
   $('save').addEventListener('click', function () {
     api('save', { id: D.id, markdown: $('md').value }).then(function () { location.href = link(D.id); });
   });
-  $('delete').addEventListener('click', function () {
-    if (!confirm('Delete this recipe? It moves to the trash folder on the PC.')) return;
-    api('delete', { id: D.id }).then(function () { location.href = '/cook/'; });
-  });
+  confirmDelete();
 }
 
 function list(st) {
