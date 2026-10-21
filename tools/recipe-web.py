@@ -134,14 +134,30 @@ def recipes(library):
 
 # ---- asking Claude -------------------------------------------------------
 
-ASK_PROMPT = """You pick recipes from a home cook's collection for a search box.
-The search is: {q}
-Match by meaning, not just words: cuisine ("Indian"), dish type, main ingredient,
-diet ("vegetarian"), occasion ("quick weeknight"), or a mood ("something cozy").
-Here are the recipes, one per line as id | title | description | ingredients:
-{catalog}
-Reply with only the ids of the recipes that fit, best match first, one per line.
-If none fit, reply with only: NONE"""
+ASK_PROMPT = """You run the search box of a home cook's recipe app. Today is {today}.
+They typed: {q}
+
+It may be a recipe search, a question about their meal plan or shopping list,
+or a request to add things to the shopping list. Reply in these lines only:
+RECIPE: <id>      one per recipe that fits, best first. Match by meaning:
+                  cuisine ("Indian"), dish type, ingredient, diet, occasion, mood.
+                  Also list the recipes your answer is about.
+SAY: <answer>     only for a question or a list change; one or two short sentences.
+ADD: <item>       one per thing to put on the shopping list, as they would write it
+                  ("eggs", "2 lb chicken thighs"). Only when they ask to add.
+ADD_RECIPE: <id>  put all of a recipe's ingredients on the list. Only when asked.
+If nothing fits, reply with only: NONE
+
+Meal plan (date | recipe ids; nothing planned on dates not shown):
+{plan}
+
+Shopping list (still to buy):
+{need}
+Already have: {have}
+
+Recipes, one per line as id | title | description | ingredients:
+{catalog}"""
+EXTRA = "extra"  # list entry holding things added by hand, not from a recipe
 
 
 def _claude():
@@ -155,28 +171,41 @@ def _claude():
     return exe
 
 
-def _catalog(library):
+def _catalog(rows):
     lines = []
-    for cat, rows in recipes(library):
-        for r in rows:
-            items = [re.sub(r"\s*\([^)]*\)", "", t)[:40] for t in r["items"][:15]]
-            lines.append(f'{r["id"]} | {r["title"]} | {r["subtitle"][:150]} | {"; ".join(items)}')
+    for r in rows:
+        items = [re.sub(r"\s*\([^)]*\)", "", t)[:40] for t in r["items"][:15]]
+        lines.append(f'{r["id"]} | {r["title"]} | {r["subtitle"][:150]} | {"; ".join(items)}')
     return "\n".join(lines)
 
 
-def ask(library, q):
-    """Recipe ids Claude (Haiku, low effort, no tools) thinks fit the search q."""
-    q = " ".join(q.split())[:200]
-    catalog = _catalog(library)
-    key = (q.lower(), hash(catalog))
-    if key in ASK_CACHE:
-        return ASK_CACHE[key]
+def _prompt(q, state, rows):
+    today = datetime.date.today()
+    titles = {r["id"]: r["title"] for r in rows}
+    plan = []
+    for day in sorted(state["plan"]):
+        try:
+            d = datetime.date.fromisoformat(day)
+        except ValueError:
+            continue
+        if -7 <= (d - today).days <= 21 and state["plan"][day]:
+            meals = ", ".join(f'{m.get("id")} ({titles.get(m.get("id"), "?")})' for m in state["plan"][day])
+            plan.append(f"{d:%A %b %d} ({day}) | {meals}")
+    items = [(i.get("text", ""), i.get("have")) for r in state["list"] for i in r.get("items", [])]
+    return ASK_PROMPT.format(
+        today=f"{today:%A, %B %d, %Y}", q=q, catalog=_catalog(rows),
+        plan="\n".join(plan) or "(nothing planned)",
+        need="\n".join("- " + t for t, have in items if not have) or "(empty)",
+        have=", ".join(t for t, have in items if have) or "(nothing)")
+
+
+def _run_claude(prompt, cwd):
     args = [_claude(), "-p", "--output-format", "json", "--model", ASK_MODEL, "--effort", "low",
             "--max-turns", "1", "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
             "--no-session-persistence", "--setting-sources", "",
-            "--system-prompt", "You match search queries to recipes. Reply with recipe ids only."]
-    proc = subprocess.run(args, input=ASK_PROMPT.format(q=q, catalog=catalog), capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", cwd=library, timeout=60,
+            "--system-prompt", "You answer a recipe app's search box in the exact line format asked for."]
+    proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", cwd=cwd, timeout=60,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
         out = json.loads(proc.stdout)
@@ -184,16 +213,78 @@ def ask(library, q):
         raise RuntimeError(f"Claude failed: {(proc.stderr or proc.stdout).strip()[:200]}")
     if out.get("is_error"):
         raise RuntimeError(f"Claude error: {str(out.get('result'))[:200]}")
-    known = {r["id"] for _, rows in recipes(library) for r in rows}
-    ids = []
-    for line in (out.get("result") or "").splitlines():
-        rid = line.strip().strip("-*`'\" ").split(" | ")[0].strip()
-        if rid in known and rid not in ids:
-            ids.append(rid)
-    if len(ASK_CACHE) > 200:
-        ASK_CACHE.clear()
-    ASK_CACHE[key] = ids
-    return ids
+    return out.get("result") or ""
+
+
+def _add_to_list(library, items, recipe_ids, rows):
+    """Adds loose items and whole recipes (at 1x, keeping ticks) to the shopping list."""
+    by_id = {r["id"]: r for r in rows}
+    with LOCK:
+        state = load_state(library)
+        lst = state["list"]
+        for rid in recipe_ids:
+            old = next((x for x in lst if x.get("id") == rid), None)
+            have = [i.get("have") for i in old["items"]] if old else []
+            lst[:] = [x for x in lst if x.get("id") != rid]
+            lst.append({"id": rid, "title": by_id[rid]["title"], "scale": 1,
+                        "items": [{"text": t, "have": bool(n < len(have) and have[n])}
+                                  for n, t in enumerate(by_id[rid]["items"])]})
+        if items:
+            extra = next((x for x in lst if x.get("id") == EXTRA), None)
+            if not extra:
+                extra = {"id": EXTRA, "title": "Added by hand", "scale": 1, "items": []}
+                lst.append(extra)
+            for t in items:
+                found = next((i for i in extra["items"] if i["text"].lower() == t.lower()), None)
+                if found:
+                    found["have"] = False
+                else:
+                    extra["items"].append({"text": t, "have": False})
+        save_state(library, state)
+
+
+def ask(library, q, act=True):
+    """Hands the search box text to Claude (Haiku, low effort, no tools) with the
+    recipes, meal plan, and shopping list. Returns {"ids", "say", "added"} and
+    makes any shopping list additions it asked for. With act=False (the page asks
+    on its own while you pause typing) it only says what it would add, so a
+    half-typed "add eg" never lands on the list; Enter then adds from the cache."""
+    q = " ".join(q.split())[:200]
+    rows = [r for _, rs in recipes(library) for r in rs]
+    with LOCK:
+        state = load_state(library)
+    prompt = _prompt(q, state, rows)
+    key = (q.lower(), hash(prompt))
+    reply = ASK_CACHE.get(key)
+    if reply is None:
+        reply = _run_claude(prompt, library)
+    known = {r["id"] for r in rows}
+    ids, say, items, add_ids = [], [], [], []
+    for line in reply.splitlines():
+        line = line.strip().strip("-*`").strip()
+        tag, _, rest = line.partition(":")
+        tag, rest = tag.strip().upper(), rest.strip().strip("`'\"").split(" | ")[0].strip()
+        if tag == "RECIPE" and rest in known and rest not in ids:
+            ids.append(rest)
+        elif tag == "SAY" and rest:
+            say.append(line.partition(":")[2].strip())
+        elif tag == "ADD" and rest and len(items) < 30:
+            items.append(rest[:120])
+        elif tag == "ADD_RECIPE" and rest in known and rest not in add_ids:
+            add_ids.append(rest)
+    titles = {r["id"]: r["title"] for r in rows}
+    changes = items + [f"ingredients for {titles[i]}" for i in add_ids]
+    if changes and act:
+        ASK_CACHE.pop(key, None)  # a list change never replays from the cache
+        _add_to_list(library, items, add_ids, rows)
+    else:
+        if len(ASK_CACHE) > 200:
+            ASK_CACHE.clear()
+        ASK_CACHE[key] = reply
+    if changes and not act:
+        return {"ids": ids, "say": "Press Search to add " + ", ".join(changes) + " to your list.",
+                "added": [], "pending": True}
+    return {"ids": ids, "say": " ".join(say), "added": changes if act else []}
 
 
 # ---- stored data ---------------------------------------------------------
@@ -319,6 +410,7 @@ nav.tabs a.on { color:var(--accent); }
 input[type=search], select, textarea { width:100%; font:inherit; padding:10px 12px; border-radius:10px; border:1px solid var(--line);
   background:var(--card); color:var(--ink); }
 input[type=search] { margin-bottom:8px; }
+.answer { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:10px; padding:10px 12px; margin:0 0 12px; }
 textarea { font:15px/1.4 ui-monospace, Menlo, monospace; }
 textarea.notes { font:inherit; min-height:100px; }
 h2 { font-size:14px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:20px 0 6px; }
@@ -388,8 +480,8 @@ def index_page(library):
     groups = recipes(library)
     starred = [r for _, rows in groups for r in rows if r["id"].split("/")[1] in favs]
     starred.sort(key=lambda r: r["title"].lower())
-    parts = ['<input type="search" id="q" placeholder="Search, or ask (like &quot;Indian&quot;)" autocomplete="off" enterkeyhint="search">',
-             '<p class="empty" id="asking" hidden></p><section id="picks" hidden><h2>Claude\'s picks</h2><ul class="cards"></ul></section>']
+    parts = ['<input type="search" id="q" placeholder="Search, or ask Claude (&quot;Indian&quot;, &quot;add eggs&quot;)" autocomplete="off" enterkeyhint="search">',
+             '<p class="empty" id="asking" hidden></p><p class="answer" id="answer" hidden></p><section id="picks" hidden><h2>Claude\'s picks</h2><ul class="cards"></ul></section>']
 
     def section(name, rows):
         parts.append(f'<section><h2>{esc(name)}</h2><ul class="cards">')
@@ -576,7 +668,7 @@ state().then(function (st) {
 function index() {
   // typing filters by title at once; a pause (or Enter) also asks Claude on the PC,
   // whose picks go on top so "Indian" finds palak paneer
-  var box = $('q'), picks = $('picks'), asking = $('asking'), timer = null, asked = '';
+  var box = $('q'), picks = $('picks'), asking = $('asking'), answer = $('answer'), timer = null, asked = '', seq = 0;
   function filter(q) {
     document.querySelectorAll('section:not(#picks)').forEach(function (s) {
       var shown = 0;
@@ -586,22 +678,26 @@ function index() {
       s.style.display = shown ? '' : 'none';
     });
   }
-  function ask() {
+  function ask(act) {
     clearTimeout(timer);
     var q = box.value.trim();
-    if (q.length < 3 || q === asked) return;
-    asked = q; asking.textContent = 'Asking Claude…'; asking.hidden = false;
-    fetch('/cook/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q: q }) })
+    if (q.length < 3 || (q === asked && !act)) return;
+    asked = q; var mine = ++seq; asking.textContent = 'Asking Claude…'; asking.hidden = false;
+    fetch('/cook/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q: q, act: !!act }) })
       .then(function (r) { return r.text().then(function (t) { if (!r.ok) throw new Error(t || r.statusText); return JSON.parse(t); }); })
       .then(function (res) {
-        if (box.value.trim() !== q) return;
+        if (mine !== seq) return;  // a newer ask (or typing) replaced this one
         var ul = picks.querySelector('ul'), seen = {}; ul.innerHTML = '';
         res.ids.forEach(function (id) {
           var li = document.querySelector('section:not(#picks) li[data-id="' + CSS.escape(id) + '"]');
           if (li && !seen[id]) { seen[id] = 1; var c = li.cloneNode(true); c.style.display = ''; ul.appendChild(c); }
         });
         picks.hidden = !ul.children.length;
-        asking.textContent = 'Claude found nothing for that.'; asking.hidden = !!ul.children.length;
+        // a question about the plan or list, or a list change, comes back as a sentence
+        var said = res.say || (res.added.length ? 'Added ' + res.added.join(', ') + ' to your list.' : '');
+        answer.textContent = said; answer.hidden = !said;
+        if (res.added.length) state().then(count);
+        asking.textContent = 'Claude found nothing for that.'; asking.hidden = !!(ul.children.length || said);
         // what Claude picked is on top, so drop the same rows from the title matches below
         document.querySelectorAll('section:not(#picks)').forEach(function (s) {
           var shown = 0;
@@ -609,16 +705,16 @@ function index() {
           s.style.display = shown ? '' : 'none';
         });
       })
-      .catch(function (e) { if (box.value.trim() === q) { asking.textContent = 'Claude search failed: ' + e.message; asked = ''; } });
+      .catch(function (e) { if (mine === seq) { asking.textContent = 'Claude search failed: ' + e.message; asked = ''; } });
   }
   box.addEventListener('input', function () {
     var q = box.value.trim().toLowerCase();
-    picks.hidden = true; asking.hidden = true; asked = '';
+    picks.hidden = true; asking.hidden = true; answer.hidden = true; asked = ''; seq++;
     filter(q);
     clearTimeout(timer);
-    if (q.length >= 3) timer = setTimeout(ask, 900);
+    if (q.length >= 3) timer = setTimeout(function () { ask(false); }, 900);
   });
-  box.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); box.blur(); ask(); } });
+  box.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); box.blur(); ask(true); } });
 }
 
 function recipe(st) {
@@ -699,7 +795,7 @@ function list(st) {
     root.appendChild(el('h2', null, 'Recipes on this list'));
     st.list.forEach(function (r, ri) {
       var row = el('div', 'bar');
-      var a = el('a', null, r.title + (r.scale && r.scale !== 1 ? ' (' + fmt(r.scale) + '×)' : '')); a.href = link(r.id); a.style.flex = '1';
+      var a = el('a', null, r.title + (r.scale && r.scale !== 1 ? ' (' + fmt(r.scale) + '×)' : '')); if (r.id !== 'extra') a.href = link(r.id); a.style.flex = '1';
       var x = el('button', 'btn quiet small', 'Remove');
       x.addEventListener('click', function () { st.list.splice(ri, 1); save(); render(); });
       row.appendChild(a); row.appendChild(x); root.appendChild(row);
@@ -807,7 +903,7 @@ def handle_post(path, body, trusted, library):
         if not q:
             return 400, "Nothing to search for.", "text/plain; charset=utf-8"
         try:
-            return 200, json.dumps({"ids": ask(library, q)}), JSON
+            return 200, json.dumps(ask(library, q, data.get("act", True) is not False)), JSON
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             return 502, str(e), "text/plain; charset=utf-8"
     with LOCK:
