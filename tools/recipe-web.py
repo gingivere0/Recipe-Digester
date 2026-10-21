@@ -19,6 +19,8 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from urllib.parse import quote, unquote
@@ -27,6 +29,8 @@ CATEGORIES = ["breakfast", "mains", "sides", "soups", "baking", "desserts", "dri
 NAMES = {"misc": "Other"}
 NOTES = "My notes"
 LOCK = threading.Lock()
+ASK_MODEL = os.environ.get("RECIPE_SEARCH_MODEL", "claude-haiku-5-5")
+ASK_CACHE = {}
 
 
 def esc(text):
@@ -126,6 +130,70 @@ def recipes(library):
             })
     order = sorted(found, key=lambda c: (CATEGORIES.index(c) if c in CATEGORIES else 99, c))
     return [(c, sorted(found[c], key=lambda r: r["title"].lower())) for c in order]
+
+
+# ---- asking Claude -------------------------------------------------------
+
+ASK_PROMPT = """You pick recipes from a home cook's collection for a search box.
+The search is: {q}
+Match by meaning, not just words: cuisine ("Indian"), dish type, main ingredient,
+diet ("vegetarian"), occasion ("quick weeknight"), or a mood ("something cozy").
+Here are the recipes, one per line as id | title | description | ingredients:
+{catalog}
+Reply with only the ids of the recipes that fit, best match first, one per line.
+If none fit, reply with only: NONE"""
+
+
+def _claude():
+    exe = shutil.which("claude")
+    for guess in (os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe"),
+                  os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
+        if not exe and os.path.exists(guess):
+            exe = guess
+    if not exe:
+        raise RuntimeError("Claude Code (claude) is not installed on the PC.")
+    return exe
+
+
+def _catalog(library):
+    lines = []
+    for cat, rows in recipes(library):
+        for r in rows:
+            items = [re.sub(r"\s*\([^)]*\)", "", t)[:40] for t in r["items"][:15]]
+            lines.append(f'{r["id"]} | {r["title"]} | {r["subtitle"][:150]} | {"; ".join(items)}')
+    return "\n".join(lines)
+
+
+def ask(library, q):
+    """Recipe ids Claude (Haiku, low effort, no tools) thinks fit the search q."""
+    q = " ".join(q.split())[:200]
+    catalog = _catalog(library)
+    key = (q.lower(), hash(catalog))
+    if key in ASK_CACHE:
+        return ASK_CACHE[key]
+    args = [_claude(), "-p", "--output-format", "json", "--model", ASK_MODEL, "--effort", "low",
+            "--max-turns", "1", "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+            "--no-session-persistence", "--setting-sources", "",
+            "--system-prompt", "You match search queries to recipes. Reply with recipe ids only."]
+    proc = subprocess.run(args, input=ASK_PROMPT.format(q=q, catalog=catalog), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", cwd=library, timeout=60,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        raise RuntimeError(f"Claude failed: {(proc.stderr or proc.stdout).strip()[:200]}")
+    if out.get("is_error"):
+        raise RuntimeError(f"Claude error: {str(out.get('result'))[:200]}")
+    known = {r["id"] for _, rows in recipes(library) for r in rows}
+    ids = []
+    for line in (out.get("result") or "").splitlines():
+        rid = line.strip().strip("-*`'\" ").split(" | ")[0].strip()
+        if rid in known and rid not in ids:
+            ids.append(rid)
+    if len(ASK_CACHE) > 200:
+        ASK_CACHE.clear()
+    ASK_CACHE[key] = ids
+    return ids
 
 
 # ---- stored data ---------------------------------------------------------
@@ -320,14 +388,15 @@ def index_page(library):
     groups = recipes(library)
     starred = [r for _, rows in groups for r in rows if r["id"].split("/")[1] in favs]
     starred.sort(key=lambda r: r["title"].lower())
-    parts = ['<input type="search" id="q" placeholder="Search recipes" autocomplete="off">']
+    parts = ['<input type="search" id="q" placeholder="Search, or ask (like &quot;Indian&quot;)" autocomplete="off" enterkeyhint="search">',
+             '<p class="empty" id="asking" hidden></p><section id="picks" hidden><h2>Claude\'s picks</h2><ul class="cards"></ul></section>']
 
     def section(name, rows):
         parts.append(f'<section><h2>{esc(name)}</h2><ul class="cards">')
         for r in rows:
             img = f'<img src="{esc(r["thumb"])}" alt="" loading="lazy">' if r["thumb"] else '<span class="noimg"></span>'
             star = ' <span class="fav">&#9733;</span>' if r["id"].split("/")[1] in favs else ""
-            parts.append(f'<li data-q="{esc((r["title"] + " " + r["subtitle"]).lower())}"><a href="/cook/r/{quote(r["id"])}">{img}'
+            parts.append(f'<li data-id="{esc(r["id"])}" data-q="{esc((r["title"] + " " + r["subtitle"]).lower())}"><a href="/cook/r/{quote(r["id"])}">{img}'
                          f'<span><span class="t">{esc(r["title"])}</span>{star}<br><span class="s">{esc(r["subtitle"])}</span></span></a></li>')
         parts.append("</ul></section>")
 
@@ -504,16 +573,51 @@ state().then(function (st) {
 });
 
 function index() {
-  $('q').addEventListener('input', function () {
-    var q = this.value.trim().toLowerCase();
-    document.querySelectorAll('section').forEach(function (s) {
+  // typing filters by title at once; a pause (or Enter) also asks Claude on the PC,
+  // whose picks go on top so "Indian" finds palak paneer
+  var box = $('q'), picks = $('picks'), asking = $('asking'), timer = null, asked = '';
+  function filter(q) {
+    document.querySelectorAll('section:not(#picks)').forEach(function (s) {
       var shown = 0;
       s.querySelectorAll('li').forEach(function (li) {
         var ok = !q || li.dataset.q.indexOf(q) >= 0; li.style.display = ok ? '' : 'none'; if (ok) shown++;
       });
       s.style.display = shown ? '' : 'none';
     });
+  }
+  function ask() {
+    clearTimeout(timer);
+    var q = box.value.trim();
+    if (q.length < 3 || q === asked) return;
+    asked = q; asking.textContent = 'Asking Claude…'; asking.hidden = false;
+    fetch('/cook/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q: q }) })
+      .then(function (r) { return r.text().then(function (t) { if (!r.ok) throw new Error(t || r.statusText); return JSON.parse(t); }); })
+      .then(function (res) {
+        if (box.value.trim() !== q) return;
+        var ul = picks.querySelector('ul'), seen = {}; ul.innerHTML = '';
+        res.ids.forEach(function (id) {
+          var li = document.querySelector('section:not(#picks) li[data-id="' + CSS.escape(id) + '"]');
+          if (li && !seen[id]) { seen[id] = 1; var c = li.cloneNode(true); c.style.display = ''; ul.appendChild(c); }
+        });
+        picks.hidden = !ul.children.length;
+        asking.textContent = 'Claude found nothing for that.'; asking.hidden = !!ul.children.length;
+        // what Claude picked is on top, so drop the same rows from the title matches below
+        document.querySelectorAll('section:not(#picks)').forEach(function (s) {
+          var shown = 0;
+          s.querySelectorAll('li').forEach(function (li) { if (seen[li.dataset.id]) li.style.display = 'none'; if (li.style.display !== 'none') shown++; });
+          s.style.display = shown ? '' : 'none';
+        });
+      })
+      .catch(function (e) { if (box.value.trim() === q) { asking.textContent = 'Claude search failed: ' + e.message; asked = ''; } });
+  }
+  box.addEventListener('input', function () {
+    var q = box.value.trim().toLowerCase();
+    picks.hidden = true; asking.hidden = true; asked = '';
+    filter(q);
+    clearTimeout(timer);
+    if (q.length >= 3) timer = setTimeout(ask, 900);
   });
+  box.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); box.blur(); ask(); } });
 }
 
 function recipe(st) {
@@ -691,6 +795,15 @@ def handle_post(path, body, trusted, library):
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return 400, "That wasn't valid JSON.", "text/plain; charset=utf-8"
+    if action == "ask":
+        # not under LOCK: it takes a few seconds and only reads
+        q = str(data.get("q", "")).strip() if isinstance(data, dict) else ""
+        if not q:
+            return 400, "Nothing to search for.", "text/plain; charset=utf-8"
+        try:
+            return 200, json.dumps({"ids": ask(library, q)}), JSON
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            return 502, str(e), "text/plain; charset=utf-8"
     with LOCK:
         if action in ("list", "plan"):
             if not isinstance(data, (list, dict)):
