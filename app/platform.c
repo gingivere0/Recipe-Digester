@@ -345,9 +345,17 @@ int plat_battery(int *charging)
     return read_int("/sys/class/power_supply/max17042-0/capacity", -1);
 }
 
+/* developer mode keeps Wi-Fi up while awake; it would also keep the chip
+ * from sleeping, so turn it off for sleep and back on at wake */
+static int devmode(void)
+{
+    return !access("/data/cook/devmode", F_OK);
+}
+
 void plat_sleep(void)
 {
     plat_backlight(0);
+    if (devmode()) system("WIFI_FORCE=1 wifi down >/dev/null 2>&1");
     write_file("/sys/power/state", "mem");
 }
 
@@ -355,6 +363,7 @@ void plat_wake(void)
 {
     write_file("/sys/power/state", "on");
     backlight_now = -1;
+    if (devmode()) system("(wifi online >/tmp/wifi.log 2>&1 &)");
 }
 
 void plat_wakelock(int on)

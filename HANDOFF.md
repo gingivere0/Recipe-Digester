@@ -39,6 +39,7 @@ The last full install (with every fix below) was written to the boot partition, 
 
 - **Charger:** the original Barnes & Noble charger isn't available. Other chargers get 500 mA, which is less than the Nook uses with the screen and Wi-Fi on. It charges only when it's off or asleep.
 - **Power draw:** the battery reads `/sys/class/power_supply/max17042-0/current_now`, which is negative while discharging.
+- **Power:** the kernel ships with the chip's power saving off; Android's startup turned it on. `rootfs/init` now turns on idle sleep (`pm_debug/sleep_while_idle`) and SmartReflex, sets the CPU governor's settings at their real path (`/sys/devices/system/cpu/cpufreq/ondemand`), blocks Bluetooth, and lets the USB hub sleep. Full off mode (`enable_off_mode`, `voltage_off_while_idle`) is deliberately left off to play it safe. Measured on 2026-10-21: asleep, the chip spent 92% of its time in its low-power state (before: 0%), with one unbroken 1.5-hour sleep. The kernel still logs "Could not enter target state" after each sleep, which is expected without off mode. In developer mode the app turns Wi-Fi off for sleep and back on at wake, so SSH drops while the screen is off.
 - **Bluetooth:** "stk ldisc" errors in dmesg come from Bluetooth probing. They're harmless, though the driver could be left unloaded.
 
 ## Next steps
