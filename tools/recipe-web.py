@@ -138,14 +138,20 @@ ASK_PROMPT = """You run the search box of a home cook's recipe app. Today is {to
 They typed: {q}
 
 It may be a recipe search, a question about their meal plan or shopping list,
-or a request to add things to the shopping list. Reply in these lines only:
+or a request to add to the shopping list or meal plan. Reply in these lines only:
 RECIPE: <id>      one per recipe that fits, best first. Match by meaning:
                   cuisine ("Indian"), dish type, ingredient, diet, occasion, mood.
                   Also list the recipes your answer is about.
-SAY: <answer>     only for a question or a list change; one or two short sentences.
+SAY: <answer>     only for a question or a change; one or two short sentences.
 ADD: <item>       one per thing to put on the shopping list, as they would write it
                   ("eggs", "2 lb chicken thighs"). Only when they ask to add.
 ADD_RECIPE: <id>  put all of a recipe's ingredients on the list. Only when asked.
+PLAN: <YYYY-MM-DD> | <id> | <scale>   put a recipe on the meal plan for that day,
+                  only when asked ("plan tikka masala for Friday"). A weekday means
+                  the next one from today. scale is 1 unless they say double (2),
+                  half (0.5), and so on.
+Changes happen only through ADD, ADD_RECIPE, and PLAN lines; never SAY you
+added or planned something without writing those lines.
 If nothing fits, reply with only: NONE
 
 Meal plan (date | recipe ids; nothing planned on dates not shown):
@@ -216,11 +222,14 @@ def _run_claude(prompt, cwd):
     return out.get("result") or ""
 
 
-def _add_to_list(library, items, recipe_ids, rows):
-    """Adds loose items and whole recipes (at 1x, keeping ticks) to the shopping list."""
+def _apply(library, items, recipe_ids, plans, rows):
+    """Adds loose items and whole recipes (at 1x, keeping ticks) to the shopping
+    list, and (day, id, scale) meals to the meal plan."""
     by_id = {r["id"]: r for r in rows}
     with LOCK:
         state = load_state(library)
+        for day, rid, scale in plans:
+            state["plan"].setdefault(day, []).append({"id": rid, "scale": scale})
         lst = state["list"]
         for rid in recipe_ids:
             old = next((x for x in lst if x.get("id") == rid), None)
@@ -259,11 +268,13 @@ def ask(library, q, act=True):
     if reply is None:
         reply = _run_claude(prompt, library)
     known = {r["id"] for r in rows}
-    ids, say, items, add_ids = [], [], [], []
+    ids, say, items, add_ids, plans = [], [], [], [], []
     for line in reply.splitlines():
         line = line.strip().strip("-*`").strip()
         tag, _, rest = line.partition(":")
         tag, rest = tag.strip().upper(), rest.strip().strip("`'\"").split(" | ")[0].strip()
+        if rest + ".md" in known:  # Haiku sometimes drops the extension
+            rest += ".md"
         if tag == "RECIPE" and rest in known and rest not in ids:
             ids.append(rest)
         elif tag == "SAY" and rest:
@@ -272,19 +283,49 @@ def ask(library, q, act=True):
             items.append(rest[:120])
         elif tag == "ADD_RECIPE" and rest in known and rest not in add_ids:
             add_ids.append(rest)
+        elif tag == "PLAN" and len(plans) < 14:
+            plan = _plan_line(line.partition(":")[2], known)
+            if plan:
+                plans.append(plan)
     titles = {r["id"]: r["title"] for r in rows}
-    changes = items + [f"ingredients for {titles[i]}" for i in add_ids]
+    added = items + [f"ingredients for {titles[i]}" for i in add_ids]
+    changes = ([f"add {', '.join(added)} to your list"] if added else []) + [
+        f"plan {titles[rid]}{f' ({sc:g}x)' if sc != 1 else ''} for "
+        f"{datetime.date.fromisoformat(day):%A, %b} {datetime.date.fromisoformat(day).day}"
+        for day, rid, sc in plans]
     if changes and act:
-        ASK_CACHE.pop(key, None)  # a list change never replays from the cache
-        _add_to_list(library, items, add_ids, rows)
+        ASK_CACHE.pop(key, None)  # a change never replays from the cache
+        _apply(library, items, add_ids, plans, rows)
     else:
         if len(ASK_CACHE) > 200:
             ASK_CACHE.clear()
         ASK_CACHE[key] = reply
     if changes and not act:
-        return {"ids": ids, "say": "Press Search to add " + ", ".join(changes) + " to your list.",
+        return {"ids": ids, "say": "Press Search to " + " and ".join(changes) + ".",
                 "added": [], "pending": True}
-    return {"ids": ids, "say": " ".join(say), "added": changes if act else []}
+    return {"ids": ids, "say": " ".join(say) or (("Done: " + " and ".join(changes) + ".") if act and changes else ""),
+            "added": added if act else [], "changed": bool(act and changes)}
+
+
+def _plan_line(text, known):
+    """(day, id, scale) from "2026-10-24 | mains/x.md | 2", else None."""
+    parts = [p.strip().strip("`'\"") for p in text.split("|")]
+    if len(parts) > 1 and parts[1] + ".md" in known:
+        parts[1] += ".md"
+    if len(parts) < 2 or parts[1] not in known:
+        return None
+    try:
+        day = datetime.date.fromisoformat(parts[0])
+    except ValueError:
+        return None
+    if not 0 <= (day - datetime.date.today()).days <= 366:
+        return None
+    try:
+        scale = float(parts[2]) if len(parts) > 2 and parts[2] else 1.0
+    except ValueError:
+        scale = 1.0
+    scale = scale if 0.25 <= scale <= 10 else 1.0
+    return day.isoformat(), parts[1], int(scale) if scale == int(scale) else scale
 
 
 # ---- stored data ---------------------------------------------------------
@@ -696,7 +737,7 @@ function index() {
         // a question about the plan or list, or a list change, comes back as a sentence
         var said = res.say || (res.added.length ? 'Added ' + res.added.join(', ') + ' to your list.' : '');
         answer.textContent = said; answer.hidden = !said;
-        if (res.added.length) state().then(count);
+        if (res.changed) state().then(count);
         asking.textContent = 'Claude found nothing for that.'; asking.hidden = !!(ul.children.length || said);
         // what Claude picked is on top, so drop the same rows from the title matches below
         document.querySelectorAll('section:not(#picks)').forEach(function (s) {

@@ -4,7 +4,7 @@ Open https://your-pc.your-tailnet.ts.net/cook/ on the iPhone with the Tailscale 
 
 The recipe server (`tools/serve-recipes.py`, port 8080) serves these pages from `tools/recipe-web.py`:
 
-- **Recipes** (`/cook/`): every recipe by category, with search. Typing filters by title at once; a pause or Enter also asks Claude (Haiku, low effort, via `claude -p` on the PC) and shows its picks on top, so "Indian" finds palak paneer. It also sees the meal plan and shopping list, so "what's for dinner tomorrow?" gets an answer and "add eggs to my list" adds them (only when you press Search, not while you pause typing). Hand-added items sit under "Added by hand" on the list. Set `RECIPE_SEARCH_MODEL` to change the model. Starred recipes are listed first under Favorites.
+- **Recipes** (`/cook/`): every recipe by category, with search. Typing filters by title at once; a pause or Enter also asks Claude (Haiku, low effort, via `claude -p` on the PC) and shows its picks on top, so "Indian" finds palak paneer. It also sees the meal plan and shopping list, so "what's for dinner tomorrow?" gets an answer and "add eggs to my list" adds them, and "plan tikka masala for Friday" puts it on the meal plan (only when you press Search, not while you pause typing). Hand-added items sit under "Added by hand" on the list. Set `RECIPE_SEARCH_MODEL` to change the model. Starred recipes are listed first under Favorites.
 - **A recipe** (`/cook/r/<category>/<file>.md`):
   - The star at the top marks it as a favorite.
   - The ½×, 2×, 3×, and 5× buttons scale the ingredient amounts. Scaled amounts show in bold.
