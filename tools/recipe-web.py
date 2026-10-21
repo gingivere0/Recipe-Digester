@@ -868,14 +868,15 @@ function list(st) {
   }
   $('clear').addEventListener('click', function () { if (confirm('Clear the whole list?')) { st.list = []; save(); render(); } });
   function needed() { var lines = []; st.list.forEach(function (r) { r.items.forEach(function (i) { if (!i.have) lines.push(i.text); }); }); return lines; }
-  // A web page can't make Notes checklist items itself, so this hands the lines
-  // to the "Shopping List" shortcut on the phone, which creates a note and runs
-  // Append Checklist Item once per line.
+  // Notes only makes checklist items from its own private pasteboard type, which
+  // Safari can't write (Markdown task lists, HTML checkboxes, and the share sheet
+  // all arrive as plain text on iOS 27). Bare lines convert in one tap there.
   $('notes').addEventListener('click', function () {
     var lines = needed();
     if (!lines.length) { toast('Nothing left to buy.'); return; }
-    location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent('Shopping List') +
-      '&input=text&text=' + encodeURIComponent(lines.join('\n'));
+    var text = 'Shopping list\n' + lines.join('\n');
+    if (navigator.share) { navigator.share({ text: text }).catch(function () {}); return; }
+    toast('Sharing needs Safari on the ts.net address.');
   });
   $('copy').addEventListener('click', function () {
     var text = needed().join('\n'), btn = this;
