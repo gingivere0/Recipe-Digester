@@ -50,15 +50,16 @@ _jobs = queue.Queue()
 _on_recipe = None  # called after a recipe is written (rebuilds index.txt)
 
 
-def _load_video_intake():
+def _load(name):
     import importlib.util
-    spec = importlib.util.spec_from_file_location("video_intake", os.path.join(HERE, "video_intake.py"))
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-video = _load_video_intake()  # video links and uploads (YouTube, TikTok, Instagram, ...)
+video = _load("video_intake")  # video links and uploads (YouTube, TikTok, Instagram, ...)
+claude_guard = _load("claude_guard")  # fences in every claude -p run
 
 
 def _this():
@@ -917,12 +918,11 @@ def claude_exe():
 
 
 def run_claude(job, folder, prompt, tools="Read,WebFetch", max_turns=15, log="claude.log"):
-    args = [claude_exe(), "-p", "--output-format", "json", "--max-turns", str(max_turns), "--model", CLAUDE_MODEL,
-            # only the tools it needs, and no MCP servers or skills, keeps each run small
-            "--tools", tools, "--allowedTools", tools,
-            "--strict-mcp-config", "--disable-slash-commands"]
+    # fenced in: only the tools it needs, Read only inside this job's folder, no
+    # Bash or file writes, and a cooking-only system prompt (see claude_guard.py)
+    args = [claude_exe(), "-p"] + claude_guard.args(tools, max_turns, CLAUDE_MODEL)
     proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", cwd=folder, timeout=CLAUDE_TIMEOUT)
+                          errors="replace", cwd=folder, env=claude_guard.env(folder), timeout=CLAUDE_TIMEOUT)
     with open(os.path.join(folder, log), "w", encoding="utf-8") as f:
         f.write(f"exit {proc.returncode}\n--- stdout\n{proc.stdout}\n--- stderr\n{proc.stderr}")
     try:

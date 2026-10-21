@@ -101,7 +101,8 @@ def python():
 
 
 def ytdlp_args(cookies=None):
-    args = [python(), "-m", "yt_dlp", "--no-warnings", "--no-playlist", "--no-progress",
+    # --ignore-config: no yt-dlp.conf (from anywhere) can add options such as --exec
+    args = [python(), "-m", "yt_dlp", "--ignore-config", "--no-warnings", "--no-playlist", "--no-progress",
             "--ffmpeg-location", os.path.dirname(ffmpeg())]
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     if os.path.exists(node):  # YouTube needs a JS runtime to read its player
@@ -113,9 +114,11 @@ def ytdlp_args(cookies=None):
     return args
 
 
-def run(args, timeout=600, cwd=None):
+def run(args, timeout=600):
+    # always from tools/, never a download folder: `python -m` imports from the
+    # working directory, so a downloaded file must never sit there
     return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=timeout, cwd=cwd, creationflags=NO_WINDOW)
+                          timeout=timeout, cwd=HERE, creationflags=NO_WINDOW)
 
 
 def _err(proc):
@@ -248,7 +251,7 @@ def captions(url, info, cookies, folder):
         return None
     proc = run(ytdlp_args(cookies) + ["--skip-download", "--write-subs" if manual else "--write-auto-subs",
                                       "--sub-langs", lang, "--sub-format", "vtt/best", "--convert-subs", "vtt",
-                                      "-o", "subs.%(ext)s", url], timeout=180, cwd=folder)
+                                      "-P", folder, "-o", "subs.%(ext)s", url], timeout=180)
     files = glob.glob(os.path.join(folder, "subs*.vtt"))
     if not files:
         return None
@@ -298,7 +301,7 @@ def download_video(url, cookies, folder):
     """A small copy of the video (720p at most). Returns its path or None."""
     proc = run(ytdlp_args(cookies) + ["-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b", "-S", "res:720",
                                       "--max-filesize", "600M", "--merge-output-format", "mp4",
-                                      "-o", "video.%(ext)s", url], timeout=900, cwd=folder)
+                                      "-P", folder, "-o", "video.%(ext)s", url], timeout=900)
     files = [f for f in glob.glob(os.path.join(folder, "video.*")) if not f.endswith((".part", ".ytdl"))]
     if not files:
         with open(os.path.join(folder, "yt-dlp.log"), "a", encoding="utf-8") as f:

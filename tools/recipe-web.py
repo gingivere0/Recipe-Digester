@@ -25,6 +25,11 @@ import threading
 import time
 from urllib.parse import quote, unquote
 
+import importlib.util as _imp
+_spec = _imp.spec_from_file_location("claude_guard", os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_guard.py"))
+claude_guard = _imp.module_from_spec(_spec)  # fences in the search box's claude -p run
+_spec.loader.exec_module(claude_guard)
+
 CATEGORIES = ["breakfast", "mains", "sides", "soups", "baking", "desserts", "drinks", "misc"]
 NAMES = {"misc": "Other"}
 NOTES = "My notes"
@@ -218,12 +223,12 @@ def _prompt(q, state, rows):
 
 
 def _run_claude(prompt, cwd):
-    args = [_claude(), "-p", "--output-format", "json", "--model", ASK_MODEL, "--effort", "low",
-            "--max-turns", "1", "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
-            "--no-session-persistence", "--setting-sources", "",
-            "--system-prompt", "You answer a recipe app's search box in the exact line format asked for."]
+    # no tools at all; the reply is only read for the plan and list lines in ask()
+    args = [_claude(), "-p", "--effort", "low"] + claude_guard.args(
+        "", 1, ASK_MODEL, "Right now you answer the app's search box in the exact line format asked for.",
+        replace_system=True)
     proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", cwd=cwd, timeout=60,
+                          errors="replace", cwd=cwd, env=claude_guard.env(cwd), timeout=60,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
         out = json.loads(proc.stdout)
