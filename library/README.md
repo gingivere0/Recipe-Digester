@@ -31,3 +31,4 @@ Plain text.
 - One optional photo line, `![Photo of Recipe Title](<same name as the recipe>.jpg)`, goes under the subtitle, with the .jpg next to the .md (544 px wide works best). The phone inbox adds it itself when the source has a photo of the finished dish.
 - The Nook's list shows `<same name>.thumb.jpg` (80x80) next to each recipe: cut from the photo, or an icon Claude draws when there's no photo. `py -3 tools\recipe-inbox.py --thumbs` makes any that are missing.
 - Keep quantities with both units where the source gives them.
+- The phone inbox adds a `## Nutrition` section before Notes: one line with Claude's rough calories and protein per serving. `py -3 tools\recipe-inbox.py --nutrition` adds it to recipes that have none.

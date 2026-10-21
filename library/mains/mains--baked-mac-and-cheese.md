@@ -32,5 +32,8 @@ Baked three-cheese mac and cheese, 25-30 minutes in the oven.
 12. Optionally, broil for 2-3 minutes until top is golden brown and slightly crispy.
 13. Optionally, add chives on top once it comes out of the oven.
 
+## Nutrition
+About 810 calories and 34 g protein per serving (a rough estimate).
+
 ## Notes
 Use shredded cheese; the source lists it as "unshredded" but the steps say to shred it. The oven temperature is given as 350 in the source, with no unit.

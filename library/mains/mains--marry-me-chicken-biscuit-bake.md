@@ -30,6 +30,9 @@ Serves 6. Creamy sauce, cheese, and biscuits baked in one 9×13 dish.
 7. Bake uncovered 20–25 minutes, until hot and bubbly, the cheese is starting to brown, and the biscuits are cooked through.
 8. Rest 5–10 minutes. Top with fresh basil if you like.
 
+## Nutrition
+About 370 calories and 38 g protein per serving (a rough estimate).
+
 ## Notes
 Nutrition per serving, as listed by the recipe author: 361 calories, 38 g protein, 30 g carbs, 10 g fat.
 Recipe by @sammiikae on Instagram (posted September 6).

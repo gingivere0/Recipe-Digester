@@ -791,6 +791,78 @@ def save_thumb(img, md_path):
     make_thumb(img).save(md_path[:-3] + ".thumb.jpg", "JPEG", quality=92)
 
 
+# ---- nutrition estimates ----------------------------------------------------
+
+NUTRITION = "Nutrition"
+NUTRITION_PROMPT = """Estimate the calories and protein in one serving, from the ingredients
+and the number of servings (guess a sensible serving count if the recipe gives none),
+as ONE line of whole numbers:
+NUTRITION: <calories> kcal, <protein> g protein per serving
+"""
+
+
+def parse_nutrition(reply):
+    m = re.search(r"^NUTRITION:\s*~?(\d[\d,]*)\s*(?:kcal|cal\w*)\W+~?(\d+)\s*g", reply, re.M | re.I)
+    return (int(m.group(1).replace(",", "")), int(m.group(2))) if m else None
+
+
+def nutrition_line(calories, protein):
+    return f"About {calories} calories and {protein} g protein per serving (a rough estimate)."
+
+
+def set_nutrition(markdown, est):
+    """Puts a "## Nutrition" section (replacing any old one) before Notes, or at the end."""
+    out, skipping = [], False
+    for line in markdown.rstrip("\n").split("\n"):
+        if line.startswith("## "):
+            skipping = line[3:].strip().lower() == NUTRITION.lower()
+        if not skipping:
+            out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    if est is None:
+        return "\n".join(out) + "\n"
+    section = ["", f"## {NUTRITION}", nutrition_line(*est)]
+    at = next((i for i, l in enumerate(out) if l.startswith("## ") and
+               l[3:].strip().lower() in ("notes", "my notes")), None)
+    if at is None:
+        out += section
+    else:
+        while at > 0 and not out[at - 1].strip():
+            at -= 1
+        out[at:at] = section
+    return "\n".join(out) + "\n"
+
+
+def add_nutrition(redo=False):
+    """Estimates calories and protein for library recipes that have none. Returns messages."""
+    out = []
+    for cat in sorted(os.listdir(LIBRARY)):
+        folder = os.path.join(LIBRARY, cat)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if not name.endswith(".md") or name == "misc--welcome.md":
+                continue
+            with open(path, encoding="utf-8") as f:
+                markdown = f.read()
+            if not redo and re.search(rf"^## {NUTRITION}\s*$", markdown, re.M | re.I):
+                continue
+            work = os.path.join(INBOX, "nutrition-" + name[:-3])
+            os.makedirs(work, exist_ok=True)
+            prompt = ("Here is a recipe:\n\n" + markdown[:6000] + "\n\n" + NUTRITION_PROMPT +
+                      "Reply with ONLY the NUTRITION line.\n")
+            est = parse_nutrition(run_claude({}, work, prompt, tools="Read", max_turns=2))
+            if est is None:
+                out.append(f"{cat}/{name}: no usable estimate (see {work}\\claude.log)")
+                continue
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(set_nutrition(markdown, est))
+            out.append(f"{cat}/{name}: {nutrition_line(*est)}")
+    return out
+
+
 # ---- running Claude ---------------------------------------------------------
 
 def prompt_for(job, note, photos=()):
@@ -827,6 +899,7 @@ SLUG: <2 to 5 lowercase words joined by hyphens, like chicken-tikka-masala>
 Don't put image lines in the Markdown; the photo is added separately.
 {photo_prompt(job, photos)}
 Also add a line after SLUG with an icon. {ICON_PROMPT}
+Also add a line after SLUG with nutrition. {NUTRITION_PROMPT}
 If the source has no recipe in it, reply with only: NOT_A_RECIPE: <short reason>
 """
 
@@ -875,6 +948,7 @@ def parse_reply(reply):
     if category not in CATEGORIES:
         category = "misc"
     markdown = body[1][body[1].index("# "):].strip() + "\n"
+    markdown = set_nutrition(markdown, parse_nutrition(reply))
     slug = re.sub(r"-+", "-", slug.group(1).lower()).strip("-")[:60] or "recipe"
     return category, slug, markdown
 
@@ -974,6 +1048,7 @@ Don't put image lines in the Markdown.
 {guide}
 {photo_prompt(job, photos)}
 Also add a line after SLUG with an icon. {ICON_PROMPT}
+Also add a line after SLUG with nutrition. {NUTRITION_PROMPT}
 
 If the recipe only exists inside a video (it's spoken or shown, not written down
 anywhere you can fetch), reply with only: VIDEO: <the video's link>
@@ -1213,9 +1288,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--photo":
         for r in sys.argv[2:]:
             print(add_photo(r.replace("\\", "/").removeprefix("library/")), flush=True)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--nutrition":
+        for line in add_nutrition(redo="--redo" in sys.argv):
+            print(line, flush=True)
     elif len(sys.argv) > 1 and sys.argv[1] == "--thumbs":
         for line in add_thumbs(redo="--redo" in sys.argv):
             print(line, flush=True)
     else:
         print("usage: py -3 tools\\recipe-inbox.py --photo <category>/<name>.md ...\n"
-              "       py -3 tools\\recipe-inbox.py --thumbs [--redo]")
+              "       py -3 tools\\recipe-inbox.py --thumbs [--redo]\n"
+              "       py -3 tools\\recipe-inbox.py --nutrition [--redo]")

@@ -28,6 +28,7 @@ from urllib.parse import quote, unquote
 CATEGORIES = ["breakfast", "mains", "sides", "soups", "baking", "desserts", "drinks", "misc"]
 NAMES = {"misc": "Other"}
 NOTES = "My notes"
+NUTRITION = "Nutrition"
 LOCK = threading.Lock()
 ASK_MODEL = os.environ.get("RECIPE_SEARCH_MODEL", "claude-haiku-5-5")
 ASK_CACHE = {}
@@ -101,6 +102,16 @@ def read(library, rel):
     return parse(read_text(path)) if path else None
 
 
+def nutrition_of(recipe):
+    """The "## Nutrition" line the inbox adds, as (full line, short "410 cal, 21 g protein")."""
+    for section in recipe["sections"]:
+        if section["name"].lower() == NUTRITION.lower():
+            text = " ".join(t for _, t in section["items"])
+            m = re.search(r"(\d[\d,]*)\s*(?:calories|kcal|cal)\D+?(\d+)\s*g\s*protein", text, re.I)
+            return text, (f"{m.group(1)} cal, {m.group(2)} g protein" if m else "")
+    return "", ""
+
+
 def photo_url(library, cat, base):
     """The dish photo, else the 80x80 stand-in icon (<name>.thumb.jpg), else ""."""
     for candidate in (base + ".jpg", base + ".thumb.jpg"):
@@ -125,6 +136,7 @@ def recipes(library):
                 "id": rel,
                 "title": recipe["title"] or name[:-3].split("--")[-1].replace("-", " "),
                 "subtitle": recipe["subtitle"],
+                "nutrition": nutrition_of(recipe)[1],
                 "thumb": photo_url(library, cat, name[:-3]),
                 "items": ingredients_of(recipe),
             })
@@ -181,7 +193,7 @@ def _catalog(rows):
     lines = []
     for r in rows:
         items = [re.sub(r"\s*\([^)]*\)", "", t)[:40] for t in r["items"][:15]]
-        lines.append(f'{r["id"]} | {r["title"]} | {r["subtitle"][:150]} | {"; ".join(items)}')
+        lines.append(f'{r["id"]} | {r["title"]} | {r["subtitle"][:150]} | {r.get("nutrition") or "?"} per serving | {"; ".join(items)}')
     return "\n".join(lines)
 
 
@@ -466,6 +478,8 @@ ul.cards img, ul.cards .noimg { width:64px; height:64px; border-radius:12px; obj
 .hero { width:100%; border-radius:12px; margin:4px 0 8px; }
 .icon { width:96px; height:96px; border-radius:16px; display:block; margin:4px 0 8px; }
 .sub { color:var(--muted); margin:0 0 12px; }
+.n { color:var(--muted); font-size:13px; }
+.nut { display:inline-block; font-size:14px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:3px 10px; margin:0 0 12px; }
 .recipe ul, .recipe ol { padding-left:22px; } .recipe li { margin:4px 0; }
 .recipe h3 { font-size:15px; margin:12px 0 4px; }
 .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:12px 0; }
@@ -530,7 +544,9 @@ def index_page(library):
             img = f'<img src="{esc(r["thumb"])}" alt="" loading="lazy">' if r["thumb"] else '<span class="noimg"></span>'
             star = ' <span class="fav">&#9733;</span>' if r["id"].split("/")[1] in favs else ""
             parts.append(f'<li data-id="{esc(r["id"])}" data-q="{esc((r["title"] + " " + r["subtitle"]).lower())}"><a href="/cook/r/{quote(r["id"])}">{img}'
-                         f'<span><span class="t">{esc(r["title"])}</span>{star}<br><span class="s">{esc(r["subtitle"])}</span></span></a></li>')
+                         f'<span><span class="t">{esc(r["title"])}</span>{star}<br><span class="s">{esc(r["subtitle"])}</span>'
+                         + (f'<br><span class="n">{esc(r["nutrition"])}</span>' if r.get("nutrition") else "")
+                         + '</span></a></li>')
         parts.append("</ul></section>")
 
     if starred:
@@ -556,9 +572,12 @@ def recipe_page(library, rel):
         out.append(f'<img class="icon" src="/{quote(cat)}/{quote(base + ".thumb.jpg")}" alt="">')
     if recipe["subtitle"]:
         out.append(f'<p class="sub">{esc(recipe["subtitle"])}</p>')
+    nutrition = nutrition_of(recipe)[0]
+    if nutrition:
+        out.append(f'<p class="nut">{esc(nutrition)}</p>')
     for section in recipe["sections"]:
         is_ing = section["name"].lower().startswith("ingredient")
-        if section["name"].lower() == NOTES.lower():
+        if section["name"].lower() in (NOTES.lower(), NUTRITION.lower()):
             continue
         if is_ing:
             out.append('<div class="bar"><button class="btn" id="add">Add to shopping list</button>'
