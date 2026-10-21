@@ -220,20 +220,36 @@ def recipe_json_ld(page):
     return json.dumps(found, indent=1, ensure_ascii=False) if found else ""
 
 
-def download(url):
-    """Returns the page as text. Tries curl first: it uses the Windows certificate
-    store, which Python's bundled OpenSSL may not trust."""
-    curl = shutil.which("curl")
-    if curl:
-        proc = subprocess.run([curl, "-sSL", "--compressed", "--max-time", "30", "--max-filesize", "5000000",
-                               "-A", UA, "-H", "Accept-Language: en-US,en", "-w", "\n%{http_code}", url],
-                              capture_output=True, timeout=60)
+def curl_binaries():
+    """Every curl to try, Git for Windows' first. Its OpenSSL TLS handshake gets past
+    Cloudflare sites that answer the built-in Windows curl (Schannel) with HTTP 403."""
+    found = []
+    for c in (os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "mingw64", "bin", "curl.exe"),
+              shutil.which("curl")):
+        if c and os.path.isfile(c) and os.path.normcase(c) not in map(os.path.normcase, found):
+            found.append(c)
+    return found
+
+
+def run_curl(args, url, timeout):
+    """Tries each curl in turn. Returns (body or None, error text)."""
+    errors = []
+    for curl in curl_binaries():
+        proc = subprocess.run([curl, *args, "-w", "\n%{http_code}", url], capture_output=True, timeout=timeout)
         body, _, code = proc.stdout.rpartition(b"\n")
         if proc.returncode == 0 and code.strip() == b"200":
-            return body.decode("utf-8", errors="replace")
-        curl_error = f"curl: {proc.stderr.decode(errors='replace').strip() or 'HTTP ' + code.decode().strip()}"
-    else:
-        curl_error = "curl not found"
+            return body, ""
+        errors.append(f"{curl}: {proc.stderr.decode(errors='replace').strip() or 'HTTP ' + code.decode().strip()}")
+    return None, "; ".join(errors) or "curl not found"
+
+
+def download(url):
+    """Returns the page as text. Tries curl first: it uses the system certificate
+    store, which Python's bundled OpenSSL may not trust."""
+    body, curl_error = run_curl(["-sSL", "--compressed", "--max-time", "30", "--max-filesize", "5000000",
+                                 "-A", UA, "-H", "Accept-Language: en-US,en"], url, 60)
+    if body is not None:
+        return body.decode("utf-8", errors="replace")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en"})
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -354,14 +370,10 @@ def page_image_urls(page, url):
 
 
 def download_bytes(url, referer=""):
-    curl = shutil.which("curl")
-    if curl:
-        proc = subprocess.run([curl, "-sSL", "--max-time", "15", "--max-filesize", "15000000", "-A", UA,
-                               "-e", referer or url, "-w", "\n%{http_code}", url], capture_output=True, timeout=60)
-        body, _, code = proc.stdout.rpartition(b"\n")
-        if proc.returncode == 0 and code.strip() == b"200":
-            return body
-        return None
+    if curl_binaries():
+        body, _ = run_curl(["-sSL", "--max-time", "15", "--max-filesize", "15000000", "-A", UA,
+                            "-e", referer or url], url, 60)
+        return body
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer or url})
         with urllib.request.urlopen(req, timeout=30) as resp:
