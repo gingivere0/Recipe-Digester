@@ -653,7 +653,7 @@ def plan_page(library):
 
 def list_page():
     body = """<p class="hint">Tap anything you already have. What's left is your shopping list.</p>
-<div class="bar"><button class="btn" id="copy">Copy list</button><button class="btn quiet" id="clear">Clear all</button></div>
+<div class="bar"><button class="btn" id="copy">Copy list</button><button class="btn" id="notes">Send to Notes</button><button class="btn quiet" id="clear">Clear all</button></div>
 <div id="list"></div>"""
     return shell("Shopping list", body, tab="list", data={"page": "list"})
 
@@ -867,9 +867,18 @@ function list(st) {
     });
   }
   $('clear').addEventListener('click', function () { if (confirm('Clear the whole list?')) { st.list = []; save(); render(); } });
+  function needed() { var lines = []; st.list.forEach(function (r) { r.items.forEach(function (i) { if (!i.have) lines.push(i.text); }); }); return lines; }
+  // The share sheet is the only way a web page reaches Apple Notes; the first
+  // line becomes the note's title.
+  $('notes').addEventListener('click', function () {
+    var lines = needed();
+    if (!lines.length) { toast('Nothing left to buy.'); return; }
+    var text = 'Shopping list\n' + lines.map(function (l) { return '• ' + l; }).join('\n');
+    if (navigator.share) { navigator.share({ text: text }).catch(function () {}); return; }
+    toast('Sharing needs Safari on the ts.net address.');
+  });
   $('copy').addEventListener('click', function () {
-    var lines = []; st.list.forEach(function (r) { r.items.forEach(function (i) { if (!i.have) lines.push(i.text); }); });
-    var text = lines.join('\n'), btn = this;
+    var text = needed().join('\n'), btn = this;
     function done() { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy list'; }, 1500); }
     if (navigator.share) { navigator.share({ text: text }).catch(function () {}); return; }
     if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done); return; }
