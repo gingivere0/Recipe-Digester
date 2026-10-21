@@ -843,14 +843,14 @@ def claude_exe():
     return exe
 
 
-def run_claude(job, folder, prompt):
-    args = [claude_exe(), "-p", "--output-format", "json", "--max-turns", "15", "--model", CLAUDE_MODEL,
+def run_claude(job, folder, prompt, tools="Read,WebFetch", max_turns=15, log="claude.log"):
+    args = [claude_exe(), "-p", "--output-format", "json", "--max-turns", str(max_turns), "--model", CLAUDE_MODEL,
             # only the tools it needs, and no MCP servers or skills, keeps each run small
-            "--tools", "Read,WebFetch", "--allowedTools", "Read,WebFetch",
+            "--tools", tools, "--allowedTools", tools,
             "--strict-mcp-config", "--disable-slash-commands"]
     proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", cwd=folder, timeout=CLAUDE_TIMEOUT)
-    with open(os.path.join(folder, "claude.log"), "w", encoding="utf-8") as f:
+    with open(os.path.join(folder, log), "w", encoding="utf-8") as f:
         f.write(f"exit {proc.returncode}\n--- stdout\n{proc.stdout}\n--- stderr\n{proc.stderr}")
     try:
         out = json.loads(proc.stdout)
@@ -906,37 +906,133 @@ def save_photo(photo, path):
     photo.save(path, "JPEG", quality=85, progressive=False)
 
 
+def first_try(job, folder, found):
+    """Digests the job the direct way. Returns (Claude's reply, photo candidates).
+    Fills found["photos"] as it goes, so a rescue can reuse them."""
+    note, page = "", None
+    if job["kind"] == "url":
+        note, page = fetch_page(job["url"], folder)
+        job["fetch"] = note
+        # another video site yt-dlp knows, with no recipe data on the page
+        if not (page and recipe_json_ld(page)) and video.has_extractor(job["url"]):
+            job["kind"] = "video"
+            save(job)
+    elif job["source"].endswith(".heic"):
+        convert_heic(folder, job)
+    if job["kind"] == "video":
+        note, photos = video.prepare(job, folder, _this())
+        save(job)
+    else:
+        try:
+            photos = gather_candidates(job, folder, page)
+        except Exception as e:  # noqa: BLE001 - the recipe matters more than its photo
+            photos, job["photo"] = [], f"failed: {e}"
+    found["photos"] = photos
+    reply = run_claude(job, folder, prompt_for(job, note, photos))
+    parse_reply(reply)  # raises on NOT_A_RECIPE or a garbled reply, which starts a rescue
+    return reply, photos, folder
+
+
+def rescue_prompt(job, error, photos):
+    with open(os.path.join(LIBRARY, "README.md"), encoding="utf-8") as f:
+        guide = f.read()
+    guide = guide[guide.find("## Format"):] if "## Format" in guide else guide
+    if job.get("url"):
+        shared = f"a link: {job['url']}"
+    else:
+        shared = f"a file: {job['source']} in the current folder (read it)"
+    return f"""You are adding one recipe to a recipe library for a Nook e-reader.
+The recipe was shared as {shared}
+
+A first attempt to digest it failed with this error:
+{error}
+
+Don't give up. The person shared this because there is a recipe behind it. Work out
+where the recipe actually is, using WebSearch and WebFetch:
+- The page may load its recipe or video with JavaScript. Search for the dish name
+  with the site or author's name to find the full recipe, a print or AMP version,
+  the same recipe on the author's other sites, or the video (often on YouTube).
+- A blocked or broken page may be readable at
+  https://web.archive.org/web/2024/<the link>, or through a search result.
+- A video's description or pinned comment often links to, or contains, the recipe.
+- A screenshot or text that's cut off may be finishable by searching for its title.
+Use only the same recipe from the same source or author. Don't swap in some other
+recipe for the same dish.
+
+When you have the full recipe as text, reply in this format, and nothing else:
+
+CATEGORY: <one of: {", ".join(CATEGORIES)}>
+SLUG: <2 to 5 lowercase words joined by hyphens, like chicken-tikka-masala>
+---
+<the recipe Markdown, starting with "# ">
+
+Rewrite it in the library format below. Keep every ingredient, quantity, and step;
+drop ads, life stories, and comments. Notes must end with the link the recipe text
+came from ("Recipe page: <link>"), then "Source: {job.get('url') or 'shared file'}" as the last line.
+Don't put image lines in the Markdown.
+
+{guide}
+{photo_prompt(job, photos)}
+Also add a line after SLUG with an icon. {ICON_PROMPT}
+
+If the recipe only exists inside a video (it's spoken or shown, not written down
+anywhere you can fetch), reply with only: VIDEO: <the video's link>
+The video will then be downloaded, transcribed, and digested for you.
+
+Only if you truly can't find the recipe anywhere, reply with only:
+NOT_A_RECIPE: <what you tried, briefly>
+"""
+
+
+def rescue(job, folder, error, photos):
+    """Second pass after a failed digest: Claude searches the web for the recipe
+    itself, or names the video it lives in. Returns (reply, photo candidates, their folder)."""
+    job["first_error"] = error
+    save(job)
+    reply = run_claude(job, folder, rescue_prompt(job, error, photos), tools="Read,WebFetch,WebSearch",
+                       max_turns=40, log="rescue.log")
+    m = re.search(r"^VIDEO:\s*(https?://\S+)", reply.strip().strip("`").strip(), re.M)
+    if not m or "CATEGORY:" in reply:
+        parse_reply(reply)
+        return reply, photos, folder
+    video_url = m.group(1)
+    job["video_url"] = video_url
+    save(job)
+    vjob = dict(job, kind="video", url=video_url)
+    vfolder = os.path.join(folder, "video")
+    os.makedirs(vfolder, exist_ok=True)
+    note, vphotos = video.prepare(vjob, vfolder, _this())
+    for key in ("duration", "transcript", "frames"):
+        if key in vjob:
+            job[key] = vjob[key]
+    if job.get("url"):
+        note += f'Put the line "Shared link: {job["url"]}" just before the Source line in ## Notes.\n'
+    reply = run_claude(vjob, vfolder, prompt_for(vjob, note, vphotos))
+    parse_reply(reply)
+    return reply, vphotos, vfolder
+
+
 def process(job_id):
     job = load(job_id)
     folder = os.path.join(INBOX, job_id)
     job["status"], job["started"] = "working", time.strftime("%Y-%m-%d %H:%M:%S")
+    job.pop("error", None)
     save(job)
     try:
-        note, page = "", None
-        if job["kind"] == "url":
-            note, page = fetch_page(job["url"], folder)
-            job["fetch"] = note
-            # another video site yt-dlp knows, with no recipe data on the page
-            if not (page and recipe_json_ld(page)) and video.has_extractor(job["url"]):
-                job["kind"] = "video"
-                save(job)
-        elif job["source"].endswith(".heic"):
-            convert_heic(folder, job)
-        if job["kind"] == "video":
-            note, photos = video.prepare(job, folder, _this())
+        found = {"photos": []}
+        try:
+            reply, photos, photo_folder = first_try(job, folder, found)
+        except Exception as e:  # noqa: BLE001 - any failure gets a rescue pass before giving up
+            print(f"inbox {job_id}: first try failed ({e}); asking Claude to find the recipe", flush=True)
+            job["status"] = "searching"
             save(job)
-        else:
-            try:
-                photos = gather_candidates(job, folder, page)
-            except Exception as e:  # noqa: BLE001 - the recipe matters more than its photo
-                photos, job["photo"] = [], f"failed: {e}"
-        reply = run_claude(job, folder, prompt_for(job, note, photos))
+            reply, photos, photo_folder = rescue(job, folder, str(e), found["photos"])
         category, slug, markdown = parse_reply(reply)
         photo = None
         choice = parse_photo(reply, photos)
         if choice:
             try:
-                photo = make_photo(folder, choice)
+                photo = make_photo(photo_folder, choice)
                 job["photo"] = " ".join([choice[0]] + ([",".join(f"{v:g}" for v in choice[1])] if choice[1] else []))
             except Exception as e:  # noqa: BLE001
                 job["photo"] = f"failed: {e}"
@@ -969,7 +1065,7 @@ def start(on_recipe=None):
     _on_recipe = on_recipe
     os.makedirs(INBOX, exist_ok=True)
     for job in reversed(recent(limit=1000)):
-        if job.get("status") in ("queued", "working"):
+        if job.get("status") in ("queued", "working", "searching"):
             _jobs.put(job["id"])
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -1046,7 +1142,7 @@ button {{ font: inherit; padding: 8px 18px; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
 td {{ border-top: 1px solid #ddd; padding: 6px 4px; vertical-align: top; }}
 .what {{ word-break: break-all; color: #666; }}
-.done {{ color: #1a7f37; }} .failed {{ color: #c62828; }} .working, .queued {{ color: #9a6700; }}
+.done {{ color: #1a7f37; }} .failed {{ color: #c62828; }} .working, .queued, .searching {{ color: #9a6700; }}
 </style></head><body>
 <h1>Recipe inbox</h1>
 <form id="f">
@@ -1072,7 +1168,7 @@ document.getElementById('f').onsubmit = async (e) => {{
   msg.textContent = await r.text();
   if (r.ok) setTimeout(() => location.reload(), 1500);
 }};
-setTimeout(() => {{ if (document.querySelector('.working, .queued')) location.reload(); }}, 10000);
+setTimeout(() => {{ if (document.querySelector('.working, .queued, .searching')) location.reload(); }}, 10000);
 </script></body></html>"""
 
 
