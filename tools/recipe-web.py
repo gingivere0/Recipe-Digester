@@ -953,8 +953,21 @@ function list(st) {
         .then((function (text) { return function (res) {
           STOCK[text] = res; running--; pump();
           document.querySelectorAll('.stock').forEach(function (s) { if (s.dataset.text === text) stockNote(text, s); });
+          summary();
         }; })(text));
     }
+  }
+  // one line under Need to buy: is everything at Publix?
+  function summary() {
+    var box = $('stocksum'); if (!box) return;
+    var texts = needed(), waiting = 0, known = 0, missing = [];
+    texts.forEach(function (t) { var r = STOCK[t]; if (r === undefined || r === 'wait') waiting++; else if (r && r.found != null) { known++; if (!r.found) missing.push(r.term); } });
+    box.innerHTML = ''; box.className = 'stock';
+    if (waiting) { box.appendChild(el('span', 'spin')); box.appendChild(document.createTextNode('Checking Publix…')); return; }
+    if (!known) { box.hidden = true; return; }
+    box.hidden = false;
+    box.className = 'stock ' + (missing.length ? 'no' : 'yes');
+    box.textContent = missing.length ? 'Publix may not have: ' + missing.join(', ') : 'Publix has everything on your list.';
   }
   function render() {
     var root = $('list'); root.innerHTML = '';
@@ -972,6 +985,7 @@ function list(st) {
       });
     });
     root.appendChild(el('h2', null, 'Need to buy (' + nNeed + ')'));
+    if (nNeed) { var sum = el('p', 'stock'); sum.id = 'stocksum'; sum.style.margin = '0 0 4px'; sum.style.fontSize = '15px'; root.appendChild(sum); }
     root.appendChild(nNeed ? need : el('p', 'empty', 'You have everything.'));
     if (nHave) {
       var h = el('h2', null, 'Already have (' + nHave + ')'), reset = el('button', 'btn quiet small', 'Uncheck all');
@@ -988,6 +1002,7 @@ function list(st) {
       x.addEventListener('click', function () { st.list.splice(ri, 1); save(); render(); });
       row.appendChild(a); row.appendChild(x); root.appendChild(row);
     });
+    summary();
   }
   $('clear').addEventListener('click', function () { if (confirm('Clear the whole list?')) { st.list = []; save(); render(); } });
   function needed() { var lines = []; st.list.forEach(function (r) { r.items.forEach(function (i) { if (!i.have) lines.push(i.text); }); }); return lines; }
