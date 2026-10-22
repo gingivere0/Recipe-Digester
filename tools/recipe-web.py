@@ -4,7 +4,7 @@
   /cook/r/<cat>/<file>.md   one recipe: scaler, star, notes, add to list or plan
   /cook/edit/<cat>/<file>   edit or delete a recipe
   /cook/plan                meal planner; sends a week to the shopping list
-  /cook/list                shopping list: tap what you already have
+  /cook/list                shopping list: tap what you already have; checks Publix stock
   /cook/api/...             JSON used by the pages (see handle_post)
 
 Favorites are library/favorites.txt (one file name per line) and notes are a
@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from urllib.parse import quote, unquote
 
 import importlib.util as _imp
@@ -345,6 +346,70 @@ def _plan_line(text, known):
     return day.isoformat(), parts[1], int(scale) if scale == int(scale) else scale
 
 
+# ---- store stock -----------------------------------------------------------
+
+# publix.com renders search results into the page for whichever store the Store
+# cookie names. That says whether the store carries an item, not live shelf counts.
+STORE = os.environ.get("RECIPE_STORE", "")  # your Publix store number
+STOCK_CACHE = {}  # search term -> (time, result)
+UNITS = (r"(?:lbs?|pounds?|oz|ounces?|g|grams?|kg|ml|l|liters?|cups?|c|tbsp|tablespoons?|tsp|teaspoons?|"
+         r"cloves?|cans?|jars?|packages?|pkgs?|bags?|boxes|box|bunch(?:es)?|heads?|sticks?|slices?|pieces?|"
+         r"pinch(?:es)?|dash(?:es)?|squeeze|handful|sprigs?|stalks?|quarts?|pints?|large|medium|small|whole|"
+         r"heaping|level|of)")
+PREP = (r"(?:finely|roughly|freshly|thinly|chopped|minced|diced|sliced|grated|shredded|crushed|ground black|"
+        r"peeled|melted|softened|packed|fresh|optional)")
+
+
+def stock_term(text):
+    """The thing to search for in a list line: "2 lb (900 g) russet potatoes,
+    peeled" -> "russet potatoes"."""
+    t = re.sub(r"\([^)]*\)", " ", text)
+    t = re.sub(r"^[^:\d]{1,30}:\s*", "", t)  # "Optional:", "Yogurt dip:"
+    t = re.split(r",| such as | for | to taste", t, 1)[0]
+    alt = re.split(r"\s+or\s+", t, 1)
+    t = alt[0]
+    if len(alt) > 1 and " " not in t.strip() and len(alt[1].split()) > 1:
+        t += " " + alt[1].split()[-1]  # "russet or Yukon Gold potatoes" -> "russet potatoes"
+    t = re.sub(r"[\d½¼¾⅓⅔⅛⅜⅝⅞/.\-–]+(?=\s|$)", " ", t)
+    for _ in range(3):
+        t = re.sub(rf"^\s*(?:{UNITS}|{PREP})\b\.?\s*", "", t.strip(), flags=re.I)
+    t = re.sub(rf"\b{PREP}\b", " ", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip(" -").lower()
+
+
+def _publix(term):
+    url = "https://www.publix.com/search?searchTerm=" + quote(term)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+        "Accept": "text/html", "Cookie": "Store=" + quote(json.dumps({"StoreNumber": int(STORE)}))})
+    page = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "replace")
+    m = re.search(r':first-search-results="([^"]*)"', page)
+    if not m:
+        raise RuntimeError("Publix changed its search page.")
+    data = json.loads(html.unescape(m.group(1)))
+    hits = [p for p in data.get("storeProducts") or [] if str(p.get("storeNbr")) == STORE]
+    if not hits:
+        return None
+    p = hits[0]
+    return {"title": p.get("title") or "", "price": p.get("priceLine") or "", "url": url}
+
+
+def stock(text):
+    """Whether the store carries a list item: {"term", "found", "title", "price", "url"}."""
+    term = stock_term(text)
+    if not term:
+        return {"term": "", "found": None}
+    hit = STOCK_CACHE.get(term)
+    if hit and time.time() - hit[0] < 12 * 3600:
+        return hit[1]
+    found = _publix(term)
+    if not found and " " in term:  # "low-moisture mozzarella" -> "mozzarella"
+        found = _publix(term.rsplit(" ", 1)[1])
+    out = dict(found or {}, term=term, found=bool(found))
+    STOCK_CACHE[term] = (time.time(), out)
+    return out
+
+
 # ---- stored data ---------------------------------------------------------
 
 def _root(library):
@@ -500,6 +565,12 @@ ul.cards img, ul.cards .noimg { width:64px; height:64px; border-radius:12px; obj
 .item.have .box { background:var(--have); border-color:var(--have); }
 .from { color:var(--muted); font-size:13px; display:block; text-decoration:none; }
 .empty { color:var(--muted); padding:24px 0; text-align:center; }
+.stock { display:block; font-size:13px; color:var(--muted); text-decoration:none; }
+.stock.yes { color:#2e8b57; } .stock.no { color:#c0392b; }
+.spin { display:inline-block; width:11px; height:11px; border:2px solid var(--line); border-top-color:var(--muted);
+  border-radius:50%; animation:spin .8s linear infinite; vertical-align:-1px; margin-right:5px; }
+@keyframes spin { to { transform:rotate(360deg); } }
+h2 .btn { float:right; text-transform:none; letter-spacing:0; margin-top:-6px; }
 .hint { color:var(--muted); font-size:14px; }
 .day { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:10px; }
 .day.today { border-color:var(--accent); }
@@ -859,6 +930,32 @@ function edit() {
 
 function list(st) {
   function save() { count(st); return api('list', st.list); }
+  // Each item still to buy is looked up at the Publix store after the page draws.
+  // Results stay for the visit; a failed lookup just leaves the line blank.
+  var STOCK = {}, queue = [], running = 0;
+  function stockNote(text, span) {
+    var r = STOCK[text];
+    span.innerHTML = ''; span.className = 'stock';
+    if (r === undefined || r === 'wait') { span.appendChild(el('span', 'spin')); span.appendChild(document.createTextNode('Checking Publix…')); return; }
+    if (!r || r.found == null) { span.remove(); return; }
+    span.className = 'stock ' + (r.found ? 'yes' : 'no');
+    span.textContent = r.found ? 'Publix has it' + (r.price ? ' · ' + r.price : '') : 'Not found at Publix (' + r.term + ')';
+  }
+  function check(text) {
+    if (text in STOCK) return;
+    STOCK[text] = 'wait'; queue.push(text); pump();
+  }
+  function pump() {
+    while (running < 4 && queue.length) {
+      var text = queue.shift(); running++;
+      fetch('/cook/api/stock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) })
+        .then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
+        .then((function (text) { return function (res) {
+          STOCK[text] = res; running--; pump();
+          document.querySelectorAll('.stock').forEach(function (s) { if (s.dataset.text === text) stockNote(text, s); });
+        }; })(text));
+    }
+  }
   function render() {
     var root = $('list'); root.innerHTML = '';
     if (!st.list.length) { root.appendChild(el('p', 'empty', 'Nothing here yet. Open a recipe and tap "Add to shopping list", or use the meal plan.')); return; }
@@ -868,6 +965,7 @@ function list(st) {
         var row = el('div', 'item' + (it.have ? ' have' : ''));
         row.appendChild(el('span', 'box', it.have ? '✓' : ''));
         var t = el('span', null, it.text); if (st.list.length > 1) t.appendChild(el('span', 'from', r.title));
+        if (!it.have) { var sn = el('span', 'stock'); sn.dataset.text = it.text; t.appendChild(sn); check(it.text); stockNote(it.text, sn); }
         row.appendChild(t);
         row.addEventListener('click', function () { it.have = !it.have; save(); render(); });
         if (it.have) { have.appendChild(row); nHave++; } else { need.appendChild(row); nNeed++; }
@@ -875,7 +973,13 @@ function list(st) {
     });
     root.appendChild(el('h2', null, 'Need to buy (' + nNeed + ')'));
     root.appendChild(nNeed ? need : el('p', 'empty', 'You have everything.'));
-    if (nHave) { root.appendChild(el('h2', null, 'Already have (' + nHave + ')')); root.appendChild(have); }
+    if (nHave) {
+      var h = el('h2', null, 'Already have (' + nHave + ')'), reset = el('button', 'btn quiet small', 'Uncheck all');
+      reset.addEventListener('click', function () {
+        st.list.forEach(function (r) { r.items.forEach(function (i) { i.have = false; }); }); save(); render();
+      });
+      h.appendChild(reset); root.appendChild(h); root.appendChild(have);
+    }
     root.appendChild(el('h2', null, 'Recipes on this list'));
     st.list.forEach(function (r, ri) {
       var row = el('div', 'bar');
@@ -1000,6 +1104,13 @@ def handle_post(path, body, trusted, library):
         try:
             return 200, json.dumps(ask(library, q, data.get("act", True) is not False)), JSON
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            return 502, str(e), "text/plain; charset=utf-8"
+    if action == "stock":
+        # not under LOCK: it waits on publix.com and only reads
+        text = str(data.get("text", "")).strip() if isinstance(data, dict) else ""
+        try:
+            return 200, json.dumps(stock(text)), JSON
+        except (RuntimeError, OSError, ValueError) as e:
             return 502, str(e), "text/plain; charset=utf-8"
     with LOCK:
         if action in ("list", "plan"):
