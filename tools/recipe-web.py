@@ -554,6 +554,25 @@ def index_page(library):
                          + '</span></a></li>')
         parts.append("</ul></section>")
 
+    # recipes on the meal plan for today or later, soonest first, each once
+    by_id = {r["id"]: r for _, rows in groups for r in rows}
+    today = datetime.date.today()
+    planned, seen = [], set()
+    for day, meals in sorted(load_state(library)["plan"].items()):
+        try:
+            d = datetime.date.fromisoformat(day)
+        except ValueError:
+            continue
+        if d < today:
+            continue
+        when = "Today" if d == today else "Tomorrow" if (d - today).days == 1 else f"{d:%a %b} {d.day}"
+        for m in meals:
+            r = by_id.get(m.get("id"))
+            if r and r["id"] not in seen:
+                seen.add(r["id"])
+                planned.append(dict(r, subtitle=f'{when} · {r["subtitle"]}' if r["subtitle"] else when))
+    if planned:
+        section("Planned", planned)
     if starred:
         section("Favorites", starred)
     for cat, rows in groups:
