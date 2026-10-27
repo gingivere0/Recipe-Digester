@@ -350,7 +350,10 @@ def _plan_line(text, known):
 
 # publix.com renders search results into the page for whichever store the Store
 # cookie names. That says whether the store carries an item, not live shelf counts.
-STORE = os.environ.get("RECIPE_STORE", "")  # your Publix store number
+# Set RECIPE_STORE to your Publix store number (shown on the store page at
+# publix.com) to turn the check on, and RECIPE_STORE_NAME to name it on the list.
+STORE = os.environ.get("RECIPE_STORE", "")
+STORE_NAME = os.environ.get("RECIPE_STORE_NAME", "Publix")
 STOCK_CACHE = {}  # search term -> (time, result)
 UNITS = (r"(?:lbs?|pounds?|oz|ounces?|g|grams?|kg|ml|l|liters?|cups?|c|tbsp|tablespoons?|tsp|teaspoons?|"
          r"cloves?|cans?|jars?|packages?|pkgs?|bags?|boxes|box|bunch(?:es)?|heads?|sticks?|slices?|pieces?|"
@@ -397,7 +400,7 @@ def _publix(term):
 def stock(text):
     """Whether the store carries a list item: {"term", "found", "title", "price", "url"}."""
     term = stock_term(text)
-    if not term:
+    if not term or not STORE:
         return {"term": "", "found": None}
     hit = STOCK_CACHE.get(term)
     if hit and time.time() - hit[0] < 12 * 3600:
@@ -590,9 +593,9 @@ def shell(title, body, back=None, extra="", tab="", data=None):
     tabs = "".join(f'<a href="{href}" id="tab-{key}"{" class=on" if key == tab else ""}>{label}</a>'
                    for key, href, label in (("recipes", "/cook/", "Recipes"), ("plan", "/cook/plan", "Plan"),
                                             ("list", "/cook/list", "List")))
-    payload = ""
+    payload = '<script>var STORE_NAME = ' + json.dumps(STORE_NAME).replace("</", "<\\/") + ';</script>'
     if data is not None:
-        payload = '<script>var DATA = ' + json.dumps(data).replace("</", "<\\/") + ';</script>'
+        payload += '<script>var DATA = ' + json.dumps(data).replace("</", "<\\/") + ';</script>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -963,11 +966,11 @@ function list(st) {
     var texts = needed(), waiting = 0, known = 0, missing = [];
     texts.forEach(function (t) { var r = STOCK[t]; if (r === undefined || r === 'wait') waiting++; else if (r && r.found != null) { known++; if (!r.found) missing.push(r.term); } });
     box.innerHTML = ''; box.className = 'stock';
-    if (waiting) { box.appendChild(el('span', 'spin')); box.appendChild(document.createTextNode('Checking Publix…')); return; }
+    if (waiting) { box.appendChild(el('span', 'spin')); box.appendChild(document.createTextNode('Checking ' + STORE_NAME + '…')); return; }
     if (!known) { box.hidden = true; return; }
     box.hidden = false;
     box.className = 'stock ' + (missing.length ? 'no' : 'yes');
-    box.textContent = missing.length ? 'Publix may not have: ' + missing.join(', ') : 'Publix has everything on your list.';
+    box.textContent = missing.length ? STORE_NAME + ' may not have: ' + missing.join(', ') : STORE_NAME + ' has everything on your list.';
   }
   function render() {
     var root = $('list'); root.innerHTML = '';

@@ -1,4 +1,64 @@
-# Nook Recipes
+# Recipe Digester
+
+Turn recipe links, cooking videos, screenshots, and PDFs into clean Markdown files, browse and plan them from your phone, and cook from a Barnes & Noble Nook Color that syncs the collection over Wi-Fi.
+
+It has three parts, all served by one small Python server on a home PC:
+
+1. **The inbox** digests whatever you send it (a link, a video, a photo, a file, or pasted text) into a recipe in `library/<category>/`, using Claude Code headless (`claude -p`).
+2. **The phone pages** at `/cook/` browse the library, scale servings, plan meals, build a shopping list, and edit recipes. They're reachable away from home over Tailscale (see [PHONE.md](PHONE.md)).
+3. **The Nook** runs a tiny custom Linux system that boots straight into a cookbook app, which syncs the library from the server.
+
+The screenshots below use sample recipes.
+
+## The inbox: anything in, Markdown out
+
+Send a recipe from the phone's share sheet (an "Add to Nook" Shortcut) or the inbox page at `/inbox`. Each upload becomes a job; when it's done, the recipe has a photo, a list thumbnail, a category, and a calorie and protein estimate.
+
+<img src="docs/screenshots/inbox.png" width="600" alt="The inbox page with three finished jobs: a YouTube video, an image, and an Allrecipes link">
+
+**A recipe link.** The page is downloaded, the recipe data most sites embed is pulled out, and Claude rewrites it in the Nook format. When the page has no recipe, Claude searches for one before giving up.
+
+<img src="docs/screenshots/inbox-url.png" width="800" alt="An Allrecipes link turned into a Chicken Parmesan Markdown file">
+
+**A cooking video** from YouTube, TikTok, Instagram, X, Facebook, or anything else yt-dlp knows, or an uploaded video file.
+
+<img src="docs/screenshots/inbox-video.png" width="800" alt="A YouTube banana bread video turned into a Markdown recipe">
+
+**A photo or screenshot** of a recipe card, a cookbook page, or a document (PDFs work too).
+
+<img src="docs/screenshots/inbox-photo.png" width="800" alt="A phone screenshot of a mac and cheese recipe turned into a Markdown recipe">
+
+## The phone pages
+
+| Recipes | A recipe | Meal plan |
+|---|---|---|
+| <img src="docs/screenshots/phone-recipes.png" width="250" alt="Recipe list with planned meals and favorites"> | <img src="docs/screenshots/phone-recipe.png" width="250" alt="Chicken Parmesan with photo, serving scaler, and ingredients"> | <img src="docs/screenshots/phone-plan.png" width="250" alt="Meal plan for the next seven days"> |
+| Planned meals and favorites on top. The search box filters by title and also asks Claude ("Indian", "what's for dinner tomorrow?", "add eggs to my list"). | Star a favorite, scale servings, add the ingredients to the shopping list, or put it on the plan. | The next seven days, with a serving scale per meal. |
+
+| Shopping list | Edit a recipe |
+|---|---|
+| <img src="docs/screenshots/phone-list.png" width="250" alt="Shopping list with Publix stock and prices under each item"> | <img src="docs/screenshots/phone-edit.png" width="250" alt="Editing a recipe's Markdown on the phone"> |
+| Tap what you already have. Each item still to buy is checked against your Publix store, with the price, and the top line says whether the store has everything. Copy the list or send it to Notes as a checklist. | Edit the Markdown or delete the recipe. Old versions go to `trash/` on the PC. |
+
+The store check is off until you set `RECIPE_STORE` to your Publix store number (and optionally `RECIPE_STORE_NAME`) in the server's environment.
+
+## The Nook cookbook
+
+<img src="docs/screenshots/nook-list.png" width="300" alt="The Nook app's recipe list, grouped by category, with Sync and Settings buttons">
+
+A screenshot from the device. The app opens on categories, searches every recipe, shows each recipe with its photo, scales servings, checks off items and steps as you cook, and syncs the library from the PC over Wi-Fi. It's about 100 KB of C drawing straight to the framebuffer; the whole system boots from RAM. Details are below.
+
+## Running the server
+
+```bash
+py -3 tools/serve-recipes.py
+```
+
+It rebuilds `library/index.txt` and serves the library to the Nook (`http://<PC>:8080/index.txt`), the inbox (`/inbox`), and the phone pages (`/cook/`) on port 8080. `tools/install-autostart.ps1` starts it at sign-in. The inbox needs [Claude Code](https://claude.com/claude-code) signed in on the PC; uploads must carry the token from `tools/inbox-token.txt`, which is made on first run and kept out of git.
+
+Private files stay out of the repo: the inbox token, site cookies, the device's SSH key (`.dev/`), the Nook's partition backups (`backup/`), the shopping list and meal plan (`state/`), inbox job folders, and the build output.
+
+# The Nook system
 
 A barebones operating system for a Barnes & Noble Nook Color (BNRV200) that does two things: connects to Wi-Fi and shows recipes. It replaces Android with a tiny Linux system that boots straight into one fullscreen app.
 
