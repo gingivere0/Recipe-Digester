@@ -74,8 +74,9 @@ photos() {
 }
 
 if head -n 1 "$IN/.list" | grep -q '^# '; then
-    mv "$IN/.list" "$IN/$(name_for "$URL")"
-    photos "$IN/$(name_for "$URL")" "$URL"
+    f=$IN/$(name_for "$URL")
+    mv "$IN/.list" "$f"
+    photos "$f" "$URL"
     ok=1
     total=1
 else
@@ -87,10 +88,11 @@ else
     while read -r link; do
         i=$((i+1))
         u=$(resolve "$link" "$URL")
+        f=$IN/$(name_for "$u")
         echo "MSG Downloading $i of $total…"
-        if get "$u" "$IN/$(name_for "$u")"; then
+        if get "$u" "$f"; then
             ok=$((ok+1))
-            photos "$IN/$(name_for "$u")" "$u"
+            photos "$f" "$u"
         fi
     done < "$IN/.links"
     rm -f "$IN/.list" "$IN/.links"
