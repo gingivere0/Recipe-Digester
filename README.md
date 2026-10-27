@@ -2,33 +2,9 @@
 
 Turn recipe links, cooking videos, screenshots, and PDFs into clean Markdown files, browse and plan them from your phone, and cook from a Barnes & Noble Nook Color that syncs the collection over Wi-Fi.
 
-It has three parts, all served by one small Python server on a home PC:
-
-1. **The inbox** digests whatever you send it (a link, a video, a photo, a file, or pasted text) into a recipe in `library/<category>/`, using Claude Code headless (`claude -p`).
-2. **The phone pages** at `/cook/` browse the library, scale servings, plan meals, build a shopping list, and edit recipes. They're reachable away from home over Tailscale (see [PHONE.md](PHONE.md)).
-3. **The Nook** runs a tiny custom Linux system that boots straight into a cookbook app, which syncs the library from the server.
-
-The screenshots below use sample recipes.
-
-## The inbox: anything in, Markdown out
-
-Send a recipe from the phone's share sheet (an "Add to Nook" Shortcut) or the inbox page at `/inbox`. Each upload becomes a job; when it's done, the recipe has a photo, a list thumbnail, a category, and a calorie and protein estimate.
-
-<img src="docs/screenshots/inbox.png" width="600" alt="The inbox page with three finished jobs: a YouTube video, an image, and an Allrecipes link">
-
-**A recipe link.** The page is downloaded, the recipe data most sites embed is pulled out, and Claude rewrites it in the Nook format. When the page has no recipe, Claude searches for one before giving up.
-
-<img src="docs/screenshots/inbox-url.png" width="800" alt="An Allrecipes link turned into a Chicken Parmesan Markdown file">
-
-**A cooking video** from YouTube, TikTok, Instagram, X, Facebook, or anything else yt-dlp knows, or an uploaded video file.
-
-<img src="docs/screenshots/inbox-video.png" width="800" alt="A YouTube banana bread video turned into a Markdown recipe">
-
-**A photo or screenshot** of a recipe card, a cookbook page, or a document (PDFs work too).
-
-<img src="docs/screenshots/inbox-photo.png" width="800" alt="A phone screenshot of a mac and cheese recipe turned into a Markdown recipe">
-
 ## The phone pages
+
+The screenshots use sample recipes.
 
 | Recipes | A recipe | Meal plan |
 |---|---|---|
@@ -41,6 +17,14 @@ Send a recipe from the phone's share sheet (an "Add to Nook" Shortcut) or the in
 | Tap what you already have. Each item still to buy is checked against your Publix store, with the price, and the top line says whether the store has everything. Copy the list or send it to Notes as a checklist. | Edit the Markdown or delete the recipe. Old versions go to `trash/` on the PC. |
 
 The store check is off until you set `RECIPE_STORE` to your Publix store number (and optionally `RECIPE_STORE_NAME`) in the server's environment.
+
+## How it fits together
+
+It has three parts, all served by one small Python server on a home PC:
+
+1. **The inbox** digests whatever you send it (a link, a video, a photo, a file, or pasted text) into a recipe in `library/<category>/`, using Claude Code headless (`claude -p`).
+2. **The phone pages** at `/cook/` browse the library, scale servings, plan meals, build a shopping list, and edit recipes. They're reachable away from home over Tailscale (see [PHONE.md](PHONE.md)).
+3. **The Nook** runs a tiny custom Linux system that boots straight into a cookbook app, which syncs the library from the server.
 
 ## The Nook cookbook
 
