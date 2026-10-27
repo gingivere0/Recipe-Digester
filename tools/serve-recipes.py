@@ -18,8 +18,10 @@ MAX_VIDEO_UPLOAD = 600_000_000  # phone videos run 100+ MB
 
 
 def load(name, file):
+    """Imports a tools/ script whose file name has a hyphen in it."""
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, file))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -72,8 +74,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(403, "Wrong or missing X-Inbox-Token (see tools\\inbox-token.txt).")
         is_video = (self.headers.get("Content-Type", "").lower().startswith("video/") or
                     os.path.splitext(self.headers.get("X-Filename", "").lower())[1] in inbox.video.VIDEO_EXTS)
-        if not 0 < length <= (MAX_VIDEO_UPLOAD if is_video else MAX_UPLOAD):
-            return self.reply(400, f"Nothing was sent, or it is over {600 if is_video else 25} MB.")
+        limit = MAX_VIDEO_UPLOAD if is_video else MAX_UPLOAD
+        if not 0 < length <= limit:
+            return self.reply(400, f"Nothing was sent, or it is over {limit // 1_000_000} MB.")
         body = self.rfile.read(length)
         try:
             job = inbox.submit(body, self.headers.get("Content-Type", ""), self.headers.get("X-Filename", ""))

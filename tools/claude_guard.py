@@ -18,6 +18,8 @@ PC's own Claude settings or other Claude sessions):
 import ipaddress
 import json
 import os
+import shutil
+import subprocess
 import sys
 from urllib.parse import urlsplit
 
@@ -42,14 +44,14 @@ addresses. Reply with plain text in the format you were asked for; you have no
 way to change files or run programs, and must not try."""
 
 
-def args(tools, max_turns, model, extra_system=None, replace_system=False):
+def args_for(tools, max_turns, model, extra_system=None, replace_system=False):
     """The claude command line flags for a fenced run (after the exe and -p). With
     replace_system the cooking prompt replaces Claude Code's own (fast, tool-less runs)."""
     tools = [t for t in tools.split(",") if t] if isinstance(tools, str) else list(tools)
     bad = set(tools) - TOOLS
     if bad:
         raise ValueError(f"tool not allowed for recipe runs: {', '.join(sorted(bad))}")
-    hook = f'"{_python()}" "{os.path.abspath(__file__)}" hook'
+    hook = f'"{python_exe()}" "{os.path.abspath(__file__)}" hook'
     settings = {
         "permissions": {"allow": tools, "deny": BLOCKED, "defaultMode": "dontAsk"},
         "hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": hook,
@@ -73,10 +75,47 @@ def env(folder):
     return e
 
 
-def _python():
+def python_exe():
+    """python.exe next to the running interpreter: a server started by pythonw.exe
+    still gets children with real stdout/stderr."""
     exe = sys.executable
-    alt = os.path.join(os.path.dirname(exe), "python.exe")  # pythonw.exe has no stdout
+    alt = os.path.join(os.path.dirname(exe), "python.exe")
     return alt if os.path.exists(alt) else exe
+
+
+def claude_exe():
+    exe = shutil.which("claude")
+    for guess in (os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe"),
+                  os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
+        if not exe and os.path.exists(guess):
+            exe = guess
+    if not exe:
+        raise RuntimeError("Claude Code (claude) is not installed on the PC.")
+    return exe
+
+
+def run(prompt, folder, tools, max_turns, model, timeout, extra_system=None, replace_system=False,
+        before=()):
+    """Runs one fenced `claude -p` with the prompt on stdin and the job folder as
+    its working directory. `before` are extra flags placed right after -p (such as
+    --effort). Returns the finished process; read its reply with reply()."""
+    args = [claude_exe(), "-p", *before] + args_for(tools, max_turns, model, extra_system, replace_system)
+    return subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", cwd=folder, env=env(folder), timeout=timeout,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def reply(proc, what="claude"):
+    """The text Claude replied with, from a run()'s JSON output. Raises RuntimeError
+    when the run failed."""
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        raise RuntimeError(f"{what} failed (exit {proc.returncode}): "
+                           f"{(proc.stderr or proc.stdout).strip()[:300]}") from None
+    if out.get("is_error"):
+        raise RuntimeError(f"{what} error: {str(out.get('result'))[:300]}")
+    return out.get("result") or ""
 
 
 # ---- the hook ---------------------------------------------------------------

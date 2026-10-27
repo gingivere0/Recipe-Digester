@@ -25,6 +25,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+from claude_guard import python_exe  # same folder as this file
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 COOKIES = os.path.join(HERE, "cookies.txt")
 VIDEO_HOSTS = ("youtube.com", "youtu.be", "x.com", "twitter.com", "instagram.com", "tiktok.com",
@@ -93,16 +95,9 @@ def ffmpeg():
     raise RuntimeError("ffmpeg not found: run `winget install Gyan.FFmpeg` or put ffmpeg.exe in tools\\bin")
 
 
-def python():
-    # the server runs under python.exe; a pythonw.exe parent still gets a console-less child
-    exe = sys.executable
-    alt = os.path.join(os.path.dirname(exe), "python.exe")
-    return alt if os.path.exists(alt) else exe
-
-
 def ytdlp_args(cookies=None):
     # --ignore-config: no yt-dlp.conf (from anywhere) can add options such as --exec
-    args = [python(), "-m", "yt_dlp", "--ignore-config", "--no-warnings", "--no-playlist", "--no-progress",
+    args = [python_exe(), "-m", "yt_dlp", "--ignore-config", "--no-warnings", "--no-playlist", "--no-progress",
             "--ffmpeg-location", os.path.dirname(ffmpeg())]
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     if os.path.exists(node):  # YouTube needs a JS runtime to read its player
@@ -192,7 +187,7 @@ def description_links(info):
 def linked_recipe(info, folder, inbox):
     """Downloads the description's links; the first with schema.org Recipe data is
     saved as recipe-page.txt. Returns (url, page HTML) or (None, None)."""
-    log = []
+    log, found = [], (None, None)
     for u in description_links(info):
         try:
             page = inbox.download(u)
@@ -206,11 +201,12 @@ def linked_recipe(info, folder, inbox):
         with open(os.path.join(folder, "recipe-page.txt"), "w", encoding="utf-8") as f:
             f.write(f"LINK: {u}\n\nSTRUCTURED RECIPE DATA FROM THE PAGE (schema.org):\n{structured}\n\n"
                     f"PAGE TEXT:\n{inbox.page_text(page)[:40000]}")
+        found = (u, page)
         break
     if log:
         with open(os.path.join(folder, "links.log"), "w", encoding="utf-8") as f:
             f.write("\n".join(log) + "\n")
-    return (u, page) if log and log[-1].endswith(": recipe data") else (None, None)
+    return found
 
 
 def vtt_text(path):
@@ -249,9 +245,9 @@ def captions(url, info, cookies, folder):
     lang, manual = _pick_subs(info)
     if not lang:
         return None
-    proc = run(ytdlp_args(cookies) + ["--skip-download", "--write-subs" if manual else "--write-auto-subs",
-                                      "--sub-langs", lang, "--sub-format", "vtt/best", "--convert-subs", "vtt",
-                                      "-P", folder, "-o", "subs.%(ext)s", url], timeout=180)
+    run(ytdlp_args(cookies) + ["--skip-download", "--write-subs" if manual else "--write-auto-subs",
+                               "--sub-langs", lang, "--sub-format", "vtt/best", "--convert-subs", "vtt",
+                               "-P", folder, "-o", "subs.%(ext)s", url], timeout=180)
     files = glob.glob(os.path.join(folder, "subs*.vtt"))
     if not files:
         return None
@@ -273,7 +269,7 @@ def transcribe(video, folder, duration):
     if proc.returncode or not os.path.exists(wav):
         return None
     out = os.path.join(folder, "transcript.txt")
-    proc = run([python(), os.path.abspath(__file__), "--transcribe", wav, out], timeout=1800)
+    proc = run([python_exe(), os.path.abspath(__file__), "--transcribe", wav, out], timeout=1800)
     with open(os.path.join(folder, "whisper.log"), "w", encoding="utf-8") as f:
         f.write(proc.stdout + proc.stderr)
     try:

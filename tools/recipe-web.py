@@ -19,17 +19,13 @@ import html
 import json
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
 import urllib.request
 from urllib.parse import quote, unquote
 
-import importlib.util as _imp
-_spec = _imp.spec_from_file_location("claude_guard", os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_guard.py"))
-claude_guard = _imp.module_from_spec(_spec)  # fences in the search box's claude -p run
-_spec.loader.exec_module(claude_guard)
+import claude_guard  # fences in the search box's claude -p run (same folder as this file)
 
 CATEGORIES = ["breakfast", "mains", "sides", "soups", "baking", "desserts", "drinks", "misc"]
 NAMES = {"misc": "Other"}
@@ -184,17 +180,6 @@ Recipes, one per line as id | title | description | ingredients:
 EXTRA = "extra"  # list entry holding things added by hand, not from a recipe
 
 
-def _claude():
-    exe = shutil.which("claude")
-    for guess in (os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe"),
-                  os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
-        if not exe and os.path.exists(guess):
-            exe = guess
-    if not exe:
-        raise RuntimeError("Claude Code (claude) is not installed on the PC.")
-    return exe
-
-
 def _catalog(rows):
     lines = []
     for r in rows:
@@ -225,19 +210,10 @@ def _prompt(q, state, rows):
 
 def _run_claude(prompt, cwd):
     # no tools at all; the reply is only read for the plan and list lines in ask()
-    args = [_claude(), "-p", "--effort", "low"] + claude_guard.args(
-        "", 1, ASK_MODEL, "Right now you answer the app's search box in the exact line format asked for.",
-        replace_system=True)
-    proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", cwd=cwd, env=claude_guard.env(cwd), timeout=60,
-                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        out = json.loads(proc.stdout)
-    except ValueError:
-        raise RuntimeError(f"Claude failed: {(proc.stderr or proc.stdout).strip()[:200]}")
-    if out.get("is_error"):
-        raise RuntimeError(f"Claude error: {str(out.get('result'))[:200]}")
-    return out.get("result") or ""
+    proc = claude_guard.run(prompt, cwd, "", 1, ASK_MODEL, timeout=60, replace_system=True,
+                            extra_system="Right now you answer the app's search box in the exact line format asked for.",
+                            before=("--effort", "low"))
+    return claude_guard.reply(proc, "Claude")
 
 
 def _apply(library, items, recipe_ids, plans, rows):

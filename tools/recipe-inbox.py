@@ -17,11 +17,14 @@ import queue
 import re
 import secrets
 import shutil
-import subprocess
+import sys
 import threading
 import time
 import urllib.request
 from html.parser import HTMLParser
+
+import claude_guard  # fences in every claude -p run (same folder as this file)
+import video_intake as video  # video links and uploads (YouTube, TikTok, Instagram, ...)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -48,24 +51,9 @@ ICON_TILE = (240, 232, 216)  # icons sit on a soft tile, so they line up with ph
 
 _jobs = queue.Queue()
 _on_recipe = None  # called after a recipe is written (rebuilds index.txt)
-
-
-def _load(name):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, name + ".py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-video = _load("video_intake")  # video links and uploads (YouTube, TikTok, Instagram, ...)
-claude_guard = _load("claude_guard")  # fences in every claude -p run
-
-
-def _this():
-    """This module's functions, for video_intake (it's loaded by path, so not in sys.modules)."""
-    import types
-    return types.SimpleNamespace(**globals())
+# this module, handed to video_intake for the page and photo helpers below
+# (its file name has a hyphen, so video_intake can't import it)
+THIS = sys.modules[__name__]
 
 
 def token():
@@ -854,7 +842,7 @@ def add_nutrition(redo=False):
             os.makedirs(work, exist_ok=True)
             prompt = ("Here is a recipe:\n\n" + markdown[:6000] + "\n\n" + NUTRITION_PROMPT +
                       "Reply with ONLY the NUTRITION line.\n")
-            est = parse_nutrition(run_claude({}, work, prompt, tools="Read", max_turns=2))
+            est = parse_nutrition(run_claude(work, prompt, tools="Read", max_turns=2))
             if est is None:
                 out.append(f"{cat}/{name}: no usable estimate (see {work}\\claude.log)")
                 continue
@@ -905,33 +893,14 @@ If the source has no recipe in it, reply with only: NOT_A_RECIPE: <short reason>
 """
 
 
-def claude_exe():
-    exe = shutil.which("claude")
-    if not exe:
-        home = os.path.expanduser("~")
-        for guess in (os.path.join(home, ".local", "bin", "claude.exe"),
-                      os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")):
-            if os.path.exists(guess):
-                return guess
-        raise RuntimeError("Claude Code (claude) is not installed or not on PATH")
-    return exe
-
-
-def run_claude(job, folder, prompt, tools="Read,WebFetch", max_turns=15, log="claude.log"):
-    # fenced in: only the tools it needs, Read only inside this job's folder, no
-    # Bash or file writes, and a cooking-only system prompt (see claude_guard.py)
-    args = [claude_exe(), "-p"] + claude_guard.args(tools, max_turns, CLAUDE_MODEL)
-    proc = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", cwd=folder, env=claude_guard.env(folder), timeout=CLAUDE_TIMEOUT)
+def run_claude(folder, prompt, tools="Read,WebFetch", max_turns=15, log="claude.log"):
+    """One fenced Claude run in the job folder: only the tools it needs, Read only
+    inside that folder, no Bash or file writes, and a cooking-only system prompt
+    (see claude_guard.py). Its output is kept as <log> in the folder."""
+    proc = claude_guard.run(prompt, folder, tools, max_turns, CLAUDE_MODEL, timeout=CLAUDE_TIMEOUT)
     with open(os.path.join(folder, log), "w", encoding="utf-8") as f:
         f.write(f"exit {proc.returncode}\n--- stdout\n{proc.stdout}\n--- stderr\n{proc.stderr}")
-    try:
-        out = json.loads(proc.stdout)
-    except ValueError:
-        raise RuntimeError(f"claude failed (exit {proc.returncode}): {(proc.stderr or proc.stdout).strip()[:300]}")
-    if out.get("is_error"):
-        raise RuntimeError(f"claude error: {str(out.get('result'))[:300]}")
-    return out.get("result") or ""
+    return claude_guard.reply(proc)
 
 
 def parse_reply(reply):
@@ -994,7 +963,7 @@ def first_try(job, folder, found):
     elif job["source"].endswith(".heic"):
         convert_heic(folder, job)
     if job["kind"] == "video":
-        note, photos = video.prepare(job, folder, _this())
+        note, photos = video.prepare(job, folder, THIS)
         save(job)
     else:
         try:
@@ -1002,7 +971,7 @@ def first_try(job, folder, found):
         except Exception as e:  # noqa: BLE001 - the recipe matters more than its photo
             photos, job["photo"] = [], f"failed: {e}"
     found["photos"] = photos
-    reply = run_claude(job, folder, prompt_for(job, note, photos))
+    reply = run_claude(folder, prompt_for(job, note, photos))
     parse_reply(reply)  # raises on NOT_A_RECIPE or a garbled reply, which starts a rescue
     return reply, photos, folder
 
@@ -1064,7 +1033,7 @@ def rescue(job, folder, error, photos):
     itself, or names the video it lives in. Returns (reply, photo candidates, their folder)."""
     job["first_error"] = error
     save(job)
-    reply = run_claude(job, folder, rescue_prompt(job, error, photos), tools="Read,WebFetch,WebSearch",
+    reply = run_claude(folder, rescue_prompt(job, error, photos), tools="Read,WebFetch,WebSearch",
                        max_turns=40, log="rescue.log")
     m = re.search(r"^VIDEO:\s*(https?://\S+)", reply.strip().strip("`").strip(), re.M)
     if not m or "CATEGORY:" in reply:
@@ -1076,13 +1045,13 @@ def rescue(job, folder, error, photos):
     vjob = dict(job, kind="video", url=video_url)
     vfolder = os.path.join(folder, "video")
     os.makedirs(vfolder, exist_ok=True)
-    note, vphotos = video.prepare(vjob, vfolder, _this())
+    note, vphotos = video.prepare(vjob, vfolder, THIS)
     for key in ("duration", "transcript", "frames"):
         if key in vjob:
             job[key] = vjob[key]
     if job.get("url"):
         note += f'Put the line "Shared link: {job["url"]}" just before the Source line in ## Notes.\n'
-    reply = run_claude(vjob, vfolder, prompt_for(vjob, note, vphotos))
+    reply = run_claude(vfolder, prompt_for(vjob, note, vphotos))
     parse_reply(reply)
     return reply, vphotos, vfolder
 
@@ -1181,7 +1150,7 @@ def add_photo(recipe):
 {photo_prompt(job, photos).replace(" after SLUG", "")}
 Reply with ONLY the PHOTO line.
 """
-    choice = parse_photo(run_claude(job, folder, prompt), photos)
+    choice = parse_photo(run_claude(folder, prompt), photos)
     photo = make_photo(folder, choice) if choice else None
     if photo is None:
         return f"{recipe}: no photo of the finished dish found"
@@ -1271,7 +1240,7 @@ def add_thumbs(redo=False):
             os.makedirs(work, exist_ok=True)
             prompt = ("Here is a recipe:\n\n" + markdown[:3000] + "\n\n" + ICON_PROMPT +
                       "\nReply with ONLY the ICON line.\n")
-            svg = parse_icon(run_claude({}, work, prompt))
+            svg = parse_icon(run_claude(work, prompt))
             icon = render_icon(svg) if svg else None
             if icon is None:
                 out.append(f"{cat}/{name}: no usable icon (see {work}\\claude.log)")
@@ -1284,7 +1253,6 @@ def add_thumbs(redo=False):
 
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 2 and sys.argv[1] == "--photo":
         for r in sys.argv[2:]:
             print(add_photo(r.replace("\\", "/").removeprefix("library/")), flush=True)
