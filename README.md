@@ -73,7 +73,8 @@ For the current status and next steps, see [HANDOFF.md](HANDOFF.md).
 app/            cook.c (UI), gfx.c/h (drawing, fonts, photos), platform.c/h (hardware), third_party/stb_truetype.h and stb_image.h
 rootfs/         files copied into the system: init, inittab, rc scripts, wifi, cook-sync, sample recipe
 build/          Dockerfile (ARMv7 Alpine build image), build.sh (produces out/)
-tools/          install.ps1 (first install from Android over adb), deploy.ps1 (updates over SSH), fb2png.py (screenshots)
+tools/          serve-recipes.py (LAN recipe server: sync list, phone pages, inbox), install.ps1 (first install
+                from Android over adb), deploy.ps1 (updates over SSH), fb2png.py (screenshots)
 backup/         the Nook's original boot partition, kernel, modules, firmware, and /rom files (needed by the build)
 .dev/           private SSH key for developer mode (keep private)
 out/            build output: uAltImg, uAltRam, cook
