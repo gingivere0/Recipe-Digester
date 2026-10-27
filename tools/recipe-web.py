@@ -1052,6 +1052,7 @@ function plan(st) {
 
 HTML = "text/html; charset=utf-8"
 JSON = "application/json; charset=utf-8"
+TEXT = "text/plain; charset=utf-8"
 
 
 def handle(path, library):
@@ -1089,27 +1090,27 @@ def handle_post(path, body, trusted, library):
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return 400, "That wasn't valid JSON.", "text/plain; charset=utf-8"
+        return 400, "That wasn't valid JSON.", TEXT
     if action == "ask":
         # not under LOCK: it takes a few seconds and only reads
         q = str(data.get("q", "")).strip() if isinstance(data, dict) else ""
         if not q:
-            return 400, "Nothing to search for.", "text/plain; charset=utf-8"
+            return 400, "Nothing to search for.", TEXT
         try:
             return 200, json.dumps(ask(library, q, data.get("act", True) is not False)), JSON
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-            return 502, str(e), "text/plain; charset=utf-8"
+            return 502, str(e), TEXT
     if action == "stock":
         # not under LOCK: it waits on publix.com and only reads
         text = str(data.get("text", "")).strip() if isinstance(data, dict) else ""
         try:
             return 200, json.dumps(stock(text)), JSON
         except (RuntimeError, OSError, ValueError) as e:
-            return 502, str(e), "text/plain; charset=utf-8"
+            return 502, str(e), TEXT
     with LOCK:
         if action in ("list", "plan"):
             if not isinstance(data, (list, dict)):
-                return 400, "Bad data.", "text/plain; charset=utf-8"
+                return 400, "Bad data.", TEXT
             state = load_state(library)
             state[action] = data
             save_state(library, state)
@@ -1117,14 +1118,14 @@ def handle_post(path, body, trusted, library):
         rel = str(data.get("id", "")) if isinstance(data, dict) else ""
         rpath = recipe_path(library, rel)
         if action not in ("favorite", "notes", "save", "delete"):
-            return 404, "Unknown action.", "text/plain; charset=utf-8"
+            return 404, "Unknown action.", TEXT
         if not rpath:
-            return 404, "That recipe is gone.", "text/plain; charset=utf-8"
+            return 404, "That recipe is gone.", TEXT
         if action == "favorite":
             set_favorite(library, os.path.basename(rpath), bool(data.get("on")))
             return 200, "{}", JSON
         if not trusted:
-            return 403, "Editing only works over Tailscale. Open the ts.net address instead.", "text/plain; charset=utf-8"
+            return 403, "Editing only works over Tailscale. Open the ts.net address instead.", TEXT
         try:
             if action == "notes":
                 set_notes(library, rpath, str(data.get("notes", "")))
@@ -1133,5 +1134,5 @@ def handle_post(path, body, trusted, library):
             else:
                 delete_recipe(library, rpath)
         except ValueError as e:
-            return 400, str(e), "text/plain; charset=utf-8"
+            return 400, str(e), TEXT
         return 200, "{}", JSON
