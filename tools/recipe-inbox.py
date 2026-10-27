@@ -100,7 +100,7 @@ def sniff(body, content_type, filename=""):
         return "url", ".txt", text.encode("utf-8")
     if text.lstrip().lower().startswith(("<!doctype html", "<html")):
         return "text", ".txt", page_text(text).encode("utf-8")
-    if filename.lower().endswith((".rtf",)):
+    if filename.lower().endswith(".rtf"):
         text = re.sub(r"\\[a-z]+-?\d* ?|[{}]", "", text)
     return "text", ".txt", text.encode("utf-8")
 
@@ -271,7 +271,7 @@ def convert_heic(folder, job):
         import pillow_heif
         pillow_heif.register_heif_opener()
     except ImportError:
-        raise RuntimeError("HEIC photo: run `py -3 -m pip install pillow pillow-heif` or share a screenshot")
+        raise RuntimeError("HEIC photo: run `py -3 -m pip install pillow pillow-heif` or share a screenshot") from None
     src = os.path.join(folder, job["source"])
     Image.open(src).convert("RGB").save(os.path.join(folder, "source.jpg"), quality=90)
     job["source"] = "source.jpg"
@@ -823,41 +823,51 @@ def set_nutrition(markdown, est):
     return "\n".join(out) + "\n"
 
 
-def add_nutrition(redo=False):
-    """Estimates calories and protein for library recipes that have none. Returns messages."""
-    out = []
+def library_recipes():
+    """Every recipe in the library as (category, file name, path, markdown), sorted."""
     for cat in sorted(os.listdir(LIBRARY)):
         folder = os.path.join(LIBRARY, cat)
         if not os.path.isdir(folder):
             continue
         for name in sorted(os.listdir(folder)):
-            path = os.path.join(folder, name)
-            if not name.endswith(".md") or name == "misc--welcome.md":
-                continue
-            with open(path, encoding="utf-8") as f:
-                markdown = f.read()
-            if not redo and re.search(rf"^## {NUTRITION}\s*$", markdown, re.M | re.I):
-                continue
-            work = os.path.join(INBOX, "nutrition-" + name[:-3])
-            os.makedirs(work, exist_ok=True)
-            prompt = ("Here is a recipe:\n\n" + markdown[:6000] + "\n\n" + NUTRITION_PROMPT +
-                      "Reply with ONLY the NUTRITION line.\n")
-            est = parse_nutrition(run_claude(work, prompt, tools="Read", max_turns=2))
-            if est is None:
-                out.append(f"{cat}/{name}: no usable estimate (see {work}\\claude.log)")
-                continue
-            with open(path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(set_nutrition(markdown, est))
-            out.append(f"{cat}/{name}: {nutrition_line(*est)}")
+            if name.endswith(".md"):
+                path = os.path.join(folder, name)
+                with open(path, encoding="utf-8") as f:
+                    yield cat, name, path, f.read()
+
+
+def add_nutrition(redo=False):
+    """Estimates calories and protein for library recipes that have none. Returns messages."""
+    out = []
+    for cat, name, path, markdown in library_recipes():
+        if name == "misc--welcome.md":
+            continue
+        if not redo and re.search(rf"^## {NUTRITION}\s*$", markdown, re.M | re.I):
+            continue
+        work = os.path.join(INBOX, "nutrition-" + name[:-3])
+        os.makedirs(work, exist_ok=True)
+        prompt = ("Here is a recipe:\n\n" + markdown[:6000] + "\n\n" + NUTRITION_PROMPT +
+                  "Reply with ONLY the NUTRITION line.\n")
+        est = parse_nutrition(run_claude(work, prompt, tools="Read", max_turns=2))
+        if est is None:
+            out.append(f"{cat}/{name}: no usable estimate (see {work}\\claude.log)")
+            continue
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(set_nutrition(markdown, est))
+        out.append(f"{cat}/{name}: {nutrition_line(*est)}")
     return out
 
 
 # ---- running Claude ---------------------------------------------------------
 
-def prompt_for(job, note, photos=()):
+def format_guide():
+    """The "## Format" part of library/README.md, which tells Claude the recipe layout."""
     with open(os.path.join(LIBRARY, "README.md"), encoding="utf-8") as f:
         guide = f.read()
-    guide = guide[guide.find("## Format"):] if "## Format" in guide else guide
+    return guide[guide.find("## Format"):] if "## Format" in guide else guide
+
+
+def prompt_for(job, note, photos=()):
     if job["kind"] == "video":
         where = note
     elif job["kind"] == "url":
@@ -876,7 +886,7 @@ Rewrite it in the library format below. Keep every ingredient, quantity, and ste
 from the source; drop ads, life stories, and comments. Fix obvious OCR mistakes.
 For a link, add the link as the last line of Notes ("Source: <link>").
 
-{guide}
+{format_guide()}
 
 Reply with ONLY this, no other text:
 
@@ -950,8 +960,9 @@ def save_photo(photo, path):
 
 
 def first_try(job, folder, found):
-    """Digests the job the direct way. Returns (Claude's reply, photo candidates).
-    Fills found["photos"] as it goes, so a rescue can reuse them."""
+    """Digests the job the direct way. Returns (Claude's reply, photo candidate
+    names, the folder they are in). Fills found["photos"] as it goes, so a rescue
+    can reuse them."""
     note, page = "", None
     if job["kind"] == "url":
         note, page = fetch_page(job["url"], folder)
@@ -977,9 +988,6 @@ def first_try(job, folder, found):
 
 
 def rescue_prompt(job, error, photos):
-    with open(os.path.join(LIBRARY, "README.md"), encoding="utf-8") as f:
-        guide = f.read()
-    guide = guide[guide.find("## Format"):] if "## Format" in guide else guide
     if job.get("url"):
         shared = f"a link: {job['url']}"
     else:
@@ -1014,7 +1022,7 @@ drop ads, life stories, and comments. Notes must end with the link the recipe te
 came from ("Recipe page: <link>"), then "Source: {job.get('url') or 'shared file'}" as the last line.
 Don't put image lines in the Markdown.
 
-{guide}
+{format_guide()}
 {photo_prompt(job, photos)}
 Also add a line after SLUG with an icon. {ICON_PROMPT}
 Also add a line after SLUG with nutrition. {NUTRITION_PROMPT}
@@ -1220,35 +1228,28 @@ def add_thumbs(redo=False):
     """Makes list thumbnails for library recipes that have none: from the recipe's
     photo, or an icon Claude draws from the recipe. Returns messages."""
     out = []
-    for cat in sorted(os.listdir(LIBRARY)):
-        folder = os.path.join(LIBRARY, cat)
-        if not os.path.isdir(folder):
+    for cat, name, path, markdown in library_recipes():
+        if os.path.exists(path[:-3] + ".thumb.jpg") and not redo:
             continue
-        for name in sorted(os.listdir(folder)):
-            path = os.path.join(folder, name)
-            if not name.endswith(".md") or (os.path.exists(path[:-3] + ".thumb.jpg") and not redo):
-                continue
-            with open(path, encoding="utf-8") as f:
-                markdown = f.read()
-            m = re.search(r"^!\[[^\]]*\]\(([^)?]+)\)", markdown, re.M)
-            photo = os.path.join(folder, os.path.basename(m.group(1))) if m else None
-            if photo and os.path.exists(photo):
-                save_thumb(_open_image(photo), path)
-                out.append(f"{cat}/{name}: thumbnail from its photo")
-                continue
-            work = os.path.join(INBOX, "icon-" + name[:-3])
-            os.makedirs(work, exist_ok=True)
-            prompt = ("Here is a recipe:\n\n" + markdown[:3000] + "\n\n" + ICON_PROMPT +
-                      "\nReply with ONLY the ICON line.\n")
-            svg = parse_icon(run_claude(work, prompt))
-            icon = render_icon(svg) if svg else None
-            if icon is None:
-                out.append(f"{cat}/{name}: no usable icon (see {work}\\claude.log)")
-                continue
-            with open(os.path.join(work, "icon.svg"), "w", encoding="utf-8") as f:
-                f.write(svg)
-            save_thumb(icon, path)
-            out.append(f"{cat}/{name}: drew an icon")
+        m = re.search(r"^!\[[^\]]*\]\(([^)?]+)\)", markdown, re.M)
+        photo = os.path.join(os.path.dirname(path), os.path.basename(m.group(1))) if m else None
+        if photo and os.path.exists(photo):
+            save_thumb(_open_image(photo), path)
+            out.append(f"{cat}/{name}: thumbnail from its photo")
+            continue
+        work = os.path.join(INBOX, "icon-" + name[:-3])
+        os.makedirs(work, exist_ok=True)
+        prompt = ("Here is a recipe:\n\n" + markdown[:3000] + "\n\n" + ICON_PROMPT +
+                  "\nReply with ONLY the ICON line.\n")
+        svg = parse_icon(run_claude(work, prompt))
+        icon = render_icon(svg) if svg else None
+        if icon is None:
+            out.append(f"{cat}/{name}: no usable icon (see {work}\\claude.log)")
+            continue
+        with open(os.path.join(work, "icon.svg"), "w", encoding="utf-8") as f:
+            f.write(svg)
+        save_thumb(icon, path)
+        out.append(f"{cat}/{name}: drew an icon")
     return out
 
 
