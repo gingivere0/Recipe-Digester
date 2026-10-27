@@ -112,6 +112,14 @@ static void save_settings(void)
     rename(tmp, p);
 }
 
+/* clamps, applies, and saves a new brightness */
+static void set_brightness(int percent)
+{
+    S.brightness = percent < 5 ? 5 : percent > 100 ? 100 : percent;
+    plat_backlight(S.brightness);
+    save_settings();
+}
+
 /* ---- recipes ---- */
 
 typedef struct {
@@ -420,14 +428,15 @@ static long long last_input, power_down_at;
 static int battery = -1, charging;
 static long long battery_at;
 
-/* touch tracking */
+/* touch tracking; the last few positions give a fling its speed */
+#define TOUCH_HIST 6
 static struct {
     int down, x0, y0, x, y, moved;
     long long t0;
     scroll_t *drag;
     float drag_start;
-    int hist_y[6];
-    long long hist_t[6];
+    int hist_y[TOUCH_HIST];
+    long long hist_t[TOUCH_HIST];
     int nh;
 } touch;
 
@@ -476,9 +485,10 @@ static void draw_battery(canvas_t *c, int right, int y)
     }
 }
 
-static int header_right = 150; /* room kept free at the right of the header */
+#define HEADER_RIGHT 150 /* room kept free at the right of the header, for the battery */
 
-static void draw_header(const char *title, int back)
+/* title bar; right is how much of the right side the title must leave alone */
+static void draw_header(const char *title, int back, int right)
 {
     fill_rect(&screen, 0, 0, W, HEADER, C_HEAD);
     int x = PAD;
@@ -486,7 +496,7 @@ static void draw_header(const char *title, int back)
         draw_text(&screen, F.back, 16, (HEADER - font_height(F.back)) / 2 - 4, "‹", -1, C_HEADTXT);
         x = 64;
     }
-    draw_fit(&screen, F.ui_bold, x, (HEADER - font_height(F.ui_bold)) / 2, W - x - header_right, title, C_HEADTXT);
+    draw_fit(&screen, F.ui_bold, x, (HEADER - font_height(F.ui_bold)) / 2, W - x - right, title, C_HEADTXT);
     draw_battery(&screen, W - 18, (HEADER - 32) / 2);
 }
 
@@ -503,6 +513,7 @@ static void draw_button(int x, int y, int w, int h, const char *label, int prima
 #define SEARCH_H 84
 
 static int lib_visible_bottom(void);
+static int kb_height(void);
 
 static int matches(recipe_t *r, const char *q)
 {
@@ -575,7 +586,7 @@ static void build_library(void)
             const char *t = r->title;
             utf8_next(&t);
             snprintf(first, sizeof first, "%.*s", (int)(t - r->title), r->title);
-            if (first[0] >= 'a' && first[0] <= 'z') first[0] -= 32;
+            first[0] = toupper((unsigned char)first[0]);
             fill_round(c, PAD, ty, THUMB, THUMB, 12, RGB(240, 232, 216));
             draw_center(c, F.title, PAD, ty + (THUMB - font_height(F.title)) / 2, THUMB, first, C_ACCENT);
         }
@@ -590,7 +601,6 @@ static void build_library(void)
 
 static int lib_visible_bottom(void)
 {
-    extern int kb_height(void);
     return kb ? H - kb_height() : H - FOOTER;
 }
 
@@ -600,7 +610,7 @@ static void draw_library(void)
     int in_cat = cur_cat != -1 && !*query;
     if (cur_cat == CAT_FAVS) snprintf(name, sizeof name, "Favorites");
     else if (in_cat) cat_label(cats[cur_cat], name, sizeof name);
-    draw_header(name, in_cat);
+    draw_header(name, in_cat, HEADER_RIGHT);
     /* search box */
     fill_rect(&screen, 0, SEARCH_Y, W, SEARCH_H, C_BG);
     int active = kb == KB_SEARCH;
@@ -642,8 +652,8 @@ enum { B_TITLE, B_H2, B_ITEM, B_STEP, B_PARA, B_GAP };
 static const struct { int num, den; const char *label; } scales[] = {
     { 1, 2, "½×" }, { 1, 1, "1×" }, { 2, 1, "2×" }, { 3, 1, "3×" }, { 5, 1, "5×" },
 };
-#define N_SCALES 5
-#define SCALE_1X 1
+#define N_SCALES ((int)(sizeof scales / sizeof *scales))
+#define SCALE_1X 1 /* index of 1× in scales */
 static int cur_scale = SCALE_1X;
 static int scale_y0 = -1, scale_y1 = -1; /* the chip row in the recipe canvas */
 
@@ -746,7 +756,8 @@ static void scale_ingredient(const char *in, char *out, size_t size, double k)
         for (char *c = before; *c; c++) *c = tolower((unsigned char)*c);
         static const char *containers[] = { "can", "package", "jar", "box", "bag", "stick" };
         int skip = 0;
-        for (int i = 0; i < 6; i++) if (strstr(before, containers[i])) skip = 1;
+        for (int i = 0; i < (int)(sizeof containers / sizeof *containers); i++)
+            if (strstr(before, containers[i])) skip = 1;
         double pa, pb;
         int pn = skip ? 0 : parse_qty(paren + 1, &pa, &pb);
         if (pn) {
@@ -947,9 +958,7 @@ static int any_checked(recipe_t *r)
 
 static void draw_recipe(void)
 {
-    header_right = W - RESET_X;
-    draw_header(recipes[cur_recipe].title, 1);
-    header_right = 150;
+    draw_header(recipes[cur_recipe].title, 1, W - RESET_X);
     /* reset (unchecks everything) and text size buttons over the battery spot */
     fill_rect(&screen, RESET_X, 0, W - RESET_X, HEADER, C_HEAD);
     draw_text(&screen, F.title, RESET_X + 16, (HEADER - font_height(F.title)) / 2 - 2, "↺", -1,
@@ -971,7 +980,7 @@ static int android_available(void)
 
 static void draw_settings(void)
 {
-    draw_header("Settings", 1);
+    draw_header("Settings", 1, HEADER_RIGHT);
     fill_rect(&screen, 0, HEADER, W, H - HEADER, C_BG);
     char val[600];
     for (int i = 0; i < SET_COUNT; i++) {
@@ -1039,7 +1048,7 @@ static void build_wifi(void)
 
 static void draw_wifi(void)
 {
-    draw_header("Wi-Fi", 1);
+    draw_header("Wi-Fi", 1, HEADER_RIGHT);
     fill_rect(&screen, 0, HEADER, W, 70, C_BG);
     const char *st = *wifi_status ? wifi_status : "Tap your network to connect.";
     draw_fit(&screen, F.small, PAD, HEADER + 22, W - 2 * PAD - 110, st, C_MUTED);
@@ -1059,7 +1068,7 @@ enum { KC_SHIFT = 1, KC_BKSP, KC_PAGE, KC_SPACE, KC_DONE, KC_CHAR };
 static kbkey_t keys[48];
 static int n_keys;
 
-int kb_height(void)
+static int kb_height(void)
 {
     return 4 * KB_ROW + 16 + (kb == KB_SEARCH ? 0 : KB_FIELD);
 }
@@ -1140,6 +1149,11 @@ static void kb_open(int target, const char *prompt, const char *initial)
     snprintf(kb_text, sizeof kb_text, "%s", initial);
     if (target == KB_SEARCH) build_library();
     dirty = 1;
+}
+
+static void edit_source(void)
+{
+    kb_open(KB_SOURCE, "Web address of your recipe list", *S.source ? S.source : "https://");
 }
 
 /* ---- jobs ---- */
@@ -1231,6 +1245,11 @@ static void show_dialog(const char *title, const char *msg, const char *b0, int 
     dirty = 1;
 }
 
+static void ask_power_off(void)
+{
+    show_dialog("Power off?", "Press the power button to turn it back on.", "Power off", ACT_POWEROFF, "Cancel", ACT_CLOSE);
+}
+
 static void job_finished(void)
 {
     int kind = job.kind;
@@ -1252,8 +1271,7 @@ static void job_finished(void)
         load_recipes();
         query[0] = 0;
         build_library();
-        if (job.ok > 0) show_dialog("Sync finished", job.status, "OK", ACT_CLOSE, NULL, 0);
-        else show_dialog("Sync failed", job.status, "OK", ACT_CLOSE, NULL, 0);
+        show_dialog(job.ok > 0 ? "Sync finished" : "Sync failed", job.status, "OK", ACT_CLOSE, NULL, 0);
     }
     dirty = 1;
 }
@@ -1317,8 +1335,8 @@ static void start_scan(void)
 
 static void draw_overlay_box(int h, int *bx, int *by, int *bw)
 {
-    /* darken what's behind by drawing a scrim of horizontal stripes is too slow;
-       a solid frame reads well and is cheap */
+    /* no translucent scrim (blending the whole screen is slow on this CPU);
+       a solid frame around the box reads well and is cheap */
     *bw = W - 2 * 40;
     *bx = 40;
     *by = (H - h) / 2;
@@ -1429,7 +1447,7 @@ static void do_action(int a)
         break;
     case ACT_SET_SOURCE:
         go(SCR_SETTINGS);
-        kb_open(KB_SOURCE, "Web address of your recipe list", *S.source ? S.source : "https://");
+        edit_source();
         break;
     }
 }
@@ -1581,19 +1599,15 @@ static void tap(int x, int y)
         if (y < HEADER || row >= SET_COUNT) return;
         switch (row) {
         case SET_WIFI: go(SCR_WIFI); break;
-        case SET_SOURCE: kb_open(KB_SOURCE, "Web address of your recipe list", *S.source ? S.source : "https://"); break;
+        case SET_SOURCE: edit_source(); break;
         case SET_SYNC: go(SCR_LIBRARY); start_sync(); break;
         case SET_BRIGHT:
-            if (x >= W - PAD - 200 && x < W - PAD - 100) S.brightness -= 10;
-            else if (x >= W - PAD - 100) S.brightness += 10;
-            if (S.brightness < 5) S.brightness = 5;
-            if (S.brightness > 100) S.brightness = 100;
-            plat_backlight(S.brightness);
-            save_settings();
+            if (x >= W - PAD - 200 && x < W - PAD - 100) set_brightness(S.brightness - 10);
+            else if (x >= W - PAD - 100) set_brightness(S.brightness + 10);
             break;
         case SET_SIZE: S.text_size = (S.text_size + 1) % 4; save_settings(); break;
         case SET_TIMEOUT: S.timeout = (S.timeout + 1) % 5; save_settings(); break;
-        case SET_POWER: show_dialog("Power off?", "Press the power button to turn it back on.", "Power off", ACT_POWEROFF, "Cancel", ACT_CLOSE); break;
+        case SET_POWER: ask_power_off(); break;
         case SET_ANDROID:
             if (android_available())
                 show_dialog("Restart into Android?", "The Nook will boot the old system once. Restart again to come back here.",
@@ -1619,16 +1633,18 @@ static void tap(int x, int y)
     }
 }
 
-static scroll_t *view_at(int y)
-{
-    scroll_t *v = scr == SCR_LIBRARY ? &lib_view : scr == SCR_RECIPE ? &recipe_view : scr == SCR_WIFI ? &wifi_view : NULL;
-    if (v && y >= v->top && y < v->top + v->height) return v;
-    return NULL;
-}
-
+/* the scroll view of the current screen, if it has one */
 static scroll_t *current_view(void)
 {
     return scr == SCR_LIBRARY ? &lib_view : scr == SCR_RECIPE ? &recipe_view : scr == SCR_WIFI ? &wifi_view : NULL;
+}
+
+/* the scroll view under portrait row y, if any */
+static scroll_t *view_at(int y)
+{
+    scroll_t *v = current_view();
+    if (v && y >= v->top && y < v->top + v->height) return v;
+    return NULL;
 }
 
 /* ---- input dispatch ---- */
@@ -1686,11 +1702,7 @@ static void handle_event(event_t *e)
             else if (scr == SCR_LIBRARY && cur_cat != -1) { cur_cat = -1; build_library(); }
             dirty = 1;
         } else if (e->key == K_VOLDOWN || e->key == K_VOLUP) {
-            S.brightness += e->key == K_VOLUP ? 10 : -10;
-            if (S.brightness < 5) S.brightness = 5;
-            if (S.brightness > 100) S.brightness = 100;
-            plat_backlight(S.brightness);
-            save_settings();
+            set_brightness(S.brightness + (e->key == K_VOLUP ? 10 : -10));
             snprintf(toast, sizeof toast, "Brightness %d%%", S.brightness);
             toast_until = t + 1500;
             dirty = 1;
@@ -1699,10 +1711,8 @@ static void handle_event(event_t *e)
     case EV_KEY_UP:
         if (e->key == K_POWER) {
             if (ignore_power_up) { ignore_power_up = 0; break; }
-            if (power_down_at && t - power_down_at >= 1200)
-                show_dialog("Power off?", "Press the power button to turn it back on.", "Power off", ACT_POWEROFF, "Cancel", ACT_CLOSE);
-            else
-                go_to_sleep();
+            if (power_down_at && t - power_down_at >= 1200) ask_power_off();
+            else go_to_sleep();
             power_down_at = 0;
         }
         break;
@@ -1727,7 +1737,11 @@ static void handle_event(event_t *e)
             scroll_clamp(touch.drag);
             dirty = 1;
         }
-        if (touch.nh == 6) { memmove(touch.hist_y, touch.hist_y + 1, 5 * sizeof(int)); memmove(touch.hist_t, touch.hist_t + 1, 5 * sizeof(long long)); touch.nh = 5; }
+        if (touch.nh == TOUCH_HIST) {
+            memmove(touch.hist_y, touch.hist_y + 1, (TOUCH_HIST - 1) * sizeof *touch.hist_y);
+            memmove(touch.hist_t, touch.hist_t + 1, (TOUCH_HIST - 1) * sizeof *touch.hist_t);
+            touch.nh = TOUCH_HIST - 1;
+        }
         touch.hist_y[touch.nh] = e->y;
         touch.hist_t[touch.nh] = t;
         touch.nh++;
@@ -1795,11 +1809,7 @@ static int load_fonts(void)
 
 int main(int argc, char **argv)
 {
-    if (argc > 1 && !strcmp(argv[1], "--home-held")) {
-        canvas_t dummy;
-        (void)dummy;
-        return plat_key_held(K_HOME) ? 0 : 1;
-    }
+    if (argc > 1 && !strcmp(argv[1], "--home-held")) return plat_key_held(K_HOME) ? 0 : 1;
     signal(SIGPIPE, SIG_IGN);
     const char *dd = getenv("COOK_DATA");
     if (dd) snprintf(data_dir, sizeof data_dir, "%s", dd);
@@ -1843,8 +1853,7 @@ int main(int argc, char **argv)
         int fds[8];
         int n = plat_input_fds(fds, 8);
         for (int i = 0; i < n; i++) pfd[i] = (struct pollfd){ fds[i], POLLIN, 0 };
-        int njob = -1;
-        if (job.fd >= 0) { njob = n; pfd[n++] = (struct pollfd){ job.fd, POLLIN, 0 }; }
+        if (job.fd >= 0) pfd[n++] = (struct pollfd){ job.fd, POLLIN, 0 };
 
         long long t = now_ms();
         int moving = !asleep && (lib_view.vel || recipe_view.vel || wifi_view.vel);
@@ -1870,8 +1879,7 @@ int main(int argc, char **argv)
 
         event_t e;
         while (plat_next_event(&e)) handle_event(&e);
-        if (njob >= 0) poll_job();
-        else if (job.fd >= 0) poll_job();
+        poll_job();
 
         if (asleep) continue;
 
@@ -1879,7 +1887,7 @@ int main(int argc, char **argv)
         if (power_down_at && t - power_down_at >= 1200) {
             power_down_at = 0;
             ignore_power_up = 1;
-            show_dialog("Power off?", "Press the power button to turn it back on.", "Power off", ACT_POWEROFF, "Cancel", ACT_CLOSE);
+            ask_power_off();
         }
 
         if (t - battery_at >= 60000) {
